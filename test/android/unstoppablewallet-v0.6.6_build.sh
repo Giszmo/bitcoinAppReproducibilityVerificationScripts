@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # unstoppablewallet_build.sh - Unstoppable Wallet Reproducible Build Verification
-# Version:       v0.6.5
+# Version:       v0.6.6
 # Organization:  WalletScrutiny.com
 # License:       MIT
 # Last modified by: Claude (WalletScrutiny agent)
-# Last modified on: 2026-10-16
+# Last modified on: 2026-11-16
 # Project:       https://github.com/horizontalsystems/unstoppable-wallet-android
 # Host deps:     docker or podman only
 # Disclaimer:    Provided as-is, without warranty. It checks whether the published APK matches a build
@@ -14,9 +14,9 @@
 #                whole-APK compare. Flavor by GitHub asset digest (google_play => assembleBaseRelease,
 #                github => assembleFdroidRelease), else by the flavor's BuildConfig key in the DEX.
 #                Lone Play base.apk, config split, non-upstream signer (F-Droid store build): exit 2.
-#                zano-kit built, ~290 MB prebuilt .a trusted; thorchain/xrp kits built and published locally.
+#                zano-kit built, ~290 MB prebuilt .a trusted; thorchain/xrp/near kits built locally.
 
-SCRIPT_VERSION="v0.6.5"
+SCRIPT_VERSION="v0.6.6"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
 if [[ -f "$SCRIPT_PATH" ]]; then
@@ -66,7 +66,7 @@ EOF
     RESULT_DONE=1
     log_info "COMPARISON_RESULTS.yaml verdict: $1"
 }
-# die <code> <note>: ftbfs YAML, then exit (2 = bad input/env, 1 = build/compare failure)
+# die <code> <note>: ftbfs YAML, exit (2 bad input/env, 1 build/compare)
 die() { write_yaml ftbfs "$2"; echo ""; echo "Exit code: $1"; exit "$1"; }
 
 if [[ "$EUID" -eq 0 ]]; then
@@ -165,7 +165,7 @@ CTR_P0="ws-unstoppable-p0-${RUN_ID}"
 CTR_P3="ws-unstoppable-source-ctr-${RUN_ID}"
 CTR_P5="ws-unstoppable-p5-${RUN_ID}"
 
-# Per-run workspace in the caller's directory (helper scripts inside, no /tmp).
+# Per-run workspace in the caller's dir; helper scripts inside.
 workspace="$(pwd -P)/unstoppable_verification_${version_arg:-unknown}_${RUN_ID}"
 P0_DIR="${workspace}/metadata"
 P3_DIR="${workspace}/source-build"
@@ -365,12 +365,11 @@ extract_wallet_hs_version() {
     local toml="/build/wallet/gradle/libs.versions.toml" ref
     ref=$(grep -E "module\s*=\s*\"com\.github\.horizontalsystems:$1\"" "$toml" \
           | sed -E 's/.*version\.ref\s*=\s*"([^"]+)".*/\1/' | head -1 || true)
-    [[ -n "$ref" ]] || return 0   # empty -> caught by require_nonempty
+    [[ -n "$ref" ]] || return 0
     grep -E "^\s*${ref}\s*=" "$toml" | sed -E 's/.*=\s*"([^"]+)".*/\1/' | head -1 || true
 }
 
-# ensure_pub <build.gradle> <artifactId> <version> [sv]: maven-publish + release publication at <version>;
-# sv adds the AGP 8 singleVariant opt-in.
+# ensure_pub <gradle> <artifactId> <version> [sv]: release publication at <version>; sv = AGP 8 singleVariant
 ensure_pub() {
     local g="$1" a="$2" v="$3"
     grep -qF "maven-publish" "$g" || sed -i "/plugins {/a\\    id 'maven-publish'" "$g"
@@ -381,6 +380,12 @@ ensure_pub() {
         printf "\nafterEvaluate {\n    publishing {\n        publications {\n            release(MavenPublication) {\n                from components.release\n                groupId = 'com.github.horizontalsystems'\n                artifactId = '%s'\n                version = '%s'\n            }\n        }\n    }\n}\n" "$a" "$v" >> "$g"
     fi
     grep -qF "version = '$v'" "$g" || { echo "ERROR: $a publication version not set to $v"; exit 1; }
+}
+
+# local_hd <module gradle>: mavenLocal before JitPack; pin hd-wallet
+local_hd() {
+    sed -i '/maven.*jitpack/i\        mavenLocal()' settings.gradle
+    sed -i -E "s/(com\\.github\\.horizontalsystems:hd-wallet-kit-android:)[^\"']+/\\1$HD_WALLET_VER/g" "$1"
 }
 
 require_nonempty() {
@@ -459,6 +464,7 @@ ZANO_VER=$(extract_wallet_hs_version "zano-kit-android")
 HD_WALLET_VER=$(extract_wallet_hs_version "hd-wallet-kit-android" || true)
 THORCHAIN_VER=$(extract_wallet_hs_version "thorchain-kit-android" || true)
 XRP_VER=$(extract_wallet_hs_version "xrp-android" || true)   # wallet >= 0.52.0
+NEAR_VER=$(extract_wallet_hs_version "near-android-kit" || true)   # wallet >= 0.53.0
 
 for kv in monero:$MONERO_VER stellar:$STELLAR_VER ton:$TON_VER bitcoin:$BITCOIN_VER ethereum:$ETHEREUM_VER \
           blockchain-fee-rate:$FEERATE_VER market:$MARKET_VER solana:$SOLANA_VER tron:$TRON_VER zano:$ZANO_VER; do
@@ -466,7 +472,7 @@ for kv in monero:$MONERO_VER stellar:$STELLAR_VER ton:$TON_VER bitcoin:$BITCOIN_
 done
 echo "Derived HS versions (wallet version catalog): monero=$MONERO_VER stellar=$STELLAR_VER ton=$TON_VER" \
      "bitcoin=$BITCOIN_VER ethereum=$ETHEREUM_VER feerate=$FEERATE_VER market=$MARKET_VER solana=$SOLANA_VER" \
-     "tron=$TRON_VER zano=$ZANO_VER hd-wallet=${HD_WALLET_VER:-<from deps>} thorchain=${THORCHAIN_VER:-<none>} xrp=${XRP_VER:-<none>}"
+     "tron=$TRON_VER zano=$ZANO_VER hd-wallet=${HD_WALLET_VER:-<from deps>} thorchain=${THORCHAIN_VER:-<none>} xrp=${XRP_VER:-<none>} near=${NEAR_VER:-<none>}"
 
 clone_at_commit "$GH/ton-kit-android.git"                     "$TON_VER"      /build/deps/ton-kit-android
 clone_at_commit "$GH/stellar-kit-android.git"                 "$STELLAR_VER"  /build/deps/stellar-kit-android
@@ -479,10 +485,9 @@ clone_at_commit "$GH/bitcoin-kit-android.git"                 "$BITCOIN_VER"  /h
 clone_at_commit "$GH/ethereum-kit-android.git"                "$ETHEREUM_VER" /build/deps/ethereum-kit-android
 clone_at_commit "$GH/tron-kit-android.git"                    "$TRON_VER"     /build/deps/tron-kit-android
 clone_at_commit "$GH/monero-kit-android.git"                  "$MONERO_VER"   /build/deps/monero-kit-android
-if [[ -n "$THORCHAIN_VER" ]]; then
-    clone_at_commit "$GH/thorchain-kit-android.git"            "$THORCHAIN_VER" /build/deps/thorchain-kit-android
-fi
+[[ -z "$THORCHAIN_VER" ]] || clone_at_commit "$GH/thorchain-kit-android.git" "$THORCHAIN_VER" /build/deps/thorchain-kit-android
 [[ -z "$XRP_VER" ]] || clone_at_commit "$GH/xrp-kit-android.git" "$XRP_VER" /build/deps/xrp-kit-android
+[[ -z "$NEAR_VER" ]] || clone_at_commit "$GH/near-android-kit.git" "$NEAR_VER" /build/deps/near-android-kit
 
 for g in /home/jitpack/build/bitcoincore/build.gradle /build/deps/tron-kit-android/tronkit/build.gradle; do
     [[ -z "$HD_WALLET_VER" ]] || break
@@ -516,8 +521,7 @@ sed -i "s/from components.release/from components.release\\n                grou
 if [[ -n "$THORCHAIN_VER" ]]; then
     echo ""; echo "=== Step 4b: thorchain-kit-android === $(date)"
     cd /build/deps/thorchain-kit-android
-    sed -i '/maven.*jitpack/i\        mavenLocal()' settings.gradle
-    sed -i -E "s/(com\\.github\\.horizontalsystems:hd-wallet-kit-android:)[^\"']+/\\1$HD_WALLET_VER/g" thorchainkit/build.gradle
+    local_hd thorchainkit/build.gradle
     if grep -qF "artifactId = 'thorchain-kit-android'" thorchainkit/build.gradle; then
         sed -i "/artifactId = 'thorchain-kit-android'/{n;s/version = '[^']*'/version = '$THORCHAIN_VER'/;}" thorchainkit/build.gradle
     else
@@ -558,10 +562,17 @@ ensure_pub zanokit/build.gradle zano-kit-android "$ZANO_VER" sv   # AGP 8.11.1
 if [[ -n "$XRP_VER" ]]; then
     echo ""; echo "=== Step 4h: xrp-kit-android === $(date)"
     cd /build/deps/xrp-kit-android
-    sed -i '/maven.*jitpack/i\        mavenLocal()' settings.gradle
-    sed -i -E "s/(com\\.github\\.horizontalsystems:hd-wallet-kit-android:)[^\"']+/\\1$HD_WALLET_VER/g" xrpkit/build.gradle
+    local_hd xrpkit/build.gradle
     ensure_pub xrpkit/build.gradle xrp-android "$XRP_VER"
     ./gradlew :xrpkit:publishToMavenLocal --no-daemon
+fi
+
+if [[ -n "$NEAR_VER" ]]; then
+    echo ""; echo "=== Step 4i: near-android-kit === $(date)"
+    cd /build/deps/near-android-kit
+    local_hd nearkit/build.gradle
+    ensure_pub nearkit/build.gradle near-android-kit "$NEAR_VER"
+    ./gradlew :nearkit:publishToMavenLocal --no-daemon
 fi
 
 echo ""; echo "=== Step 5a: bitcoin-kit-android === $(date)"
@@ -592,8 +603,7 @@ create_root_pom \
 
 echo ""; echo "=== Step 5c: tron-kit-android === $(date)"
 cd /build/deps/tron-kit-android
-sed -i '/maven.*jitpack/i\        mavenLocal()' settings.gradle
-sed -i -E "s/(com\\.github\\.horizontalsystems:hd-wallet-kit-android:)[^\"']+/\\1$HD_WALLET_VER/g" tronkit/build.gradle
+local_hd tronkit/build.gradle
 sed -i "s/from components.release/from components.release\\n                groupId = \\\"com.github.horizontalsystems\\\"\\n                artifactId = \\\"tron-kit-android\\\"\\n                version = \\\"$TRON_VER\\\"/" tronkit/build.gradle
 ./gradlew :tronkit:publishToMavenLocal --no-daemon
 
@@ -618,7 +628,7 @@ else
     AAB=$(find app/build/outputs/bundle -name "*.aab" | head -1)
     cp "$AAB" /output/app-base-release.aab
     AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort | tail -1)
-    # device-spec from the official split= names (not universal).
+    # device-spec from the official split= names.
     DABIS=(); DDEN=""; DLOC=()
     for f in /official/*.apk; do c=$("$AAPT2" dump badging "$f" 2>/dev/null | sed -n "s/.*split='config\.\([^']*\)'.*/\1/p" | head -1)
         case "$c" in
@@ -683,7 +693,7 @@ chmod +x "$ctx/build.sh"
 $CRUN rm -f "$CTR_P3" 2>/dev/null || true
 
 section "Running source build container (~120 min, $(date))"
-# & + wait: INT/TERM traps fire at once (cleanup removes the container).
+# & + wait so INT/TERM traps fire at once.
 $CRUN run \
     --name "$CTR_P3" \
     "${MEM_ARGS[@]}" \
