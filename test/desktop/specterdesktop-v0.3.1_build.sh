@@ -1,6 +1,6 @@
 #!/bin/bash
 # specterdesktop_build.sh — Specter Desktop (Linux specterd zip and Electron AppImage) reproducible build verification
-# Version: v0.3.0
+# Version: v0.3.1
 # Organization: WalletScrutiny.com
 # Last modified by: Daniel Garcia
 # Last modified on: 2026-11-17
@@ -14,7 +14,7 @@
 # compare it, udev rules and README byte for byte; on a difference, unpack both PyInstaller archives
 # and list which files differ. electron-gui: CI builds the AppImage around the official specterd's
 # sha256 (version-data.json), so the official specterd zip is fed in the same way; then compare both
-# AppImages byte for byte, and on a difference the runtime and every squashfs entry. Writes
+# AppImages byte for byte (the verdict), and on a difference the runtime and every squashfs entry. Writes
 # COMPARISON_RESULTS.yaml next to the script.
 # Supported: x86_64-linux-gnu, types tarball (specterd-v*-x86_64-linux-gnu.zip) and electron-gui
 # (specter_desktop-v*-x86_64-linux-gnu.tar.gz). Windows and macOS builds: not covered.
@@ -22,7 +22,7 @@
 # Exit codes: 0 = reproducible, 1 = not_reproducible or ftbfs, 2 = invalid parameters, 130 = stopped.
 set -euo pipefail
 
-SCRIPT_VERSION="v0.3.0"
+SCRIPT_VERSION="v0.3.1"
 APP_ID="specter"
 GH_REPO="cryptoadvance/specter-desktop"
 REPO_URL="https://github.com/${GH_REPO}.git"
@@ -564,6 +564,8 @@ compare_tarball() {
     cat > "$RESULTS_FILE" << YAML_END
 script_version: ${SCRIPT_VERSION}
 verdict: ${status}
+hashes:
+  - ${APP_HASH}
 notes: |
   Built tag v${APP_VERSION} (${APP_COMMIT}) as release.yml job build-specterd-linux does: Ubuntu 26.04,
   setup-python ${PY_VERSION} at the toolcache path, the runner checkout path, apt and PyPI packages as of
@@ -624,22 +626,25 @@ compare_electron() {
     echo "udev rules and README: ${EXTRAS_DIFF} differ"
     echo "Official app.asar pins specterd sha256 ${PINNED:-not read} (official specterd: ${SPECTERD_HASH})"
     local status=not_reproducible
-    # Byte-identical, or identical runtime and every squashfs entry identical except its timestamp:
-    # mksquashfs records each file's build-time mtime, as the tar.gz and zip around it do.
-    [[ "$EXTRAS_DIFF" -eq 0 && "$NAME_MATCH" == true ]] \
-        && [[ "$BIN_MATCH" == true || ( "$RUNTIME_MATCH" == true && "$INNER_DIFF" -eq 0 ) ]] && status=reproducible
+    # Byte-identical only. Squashfs timestamps (build-time mtimes) are upstream-fixable, so they count.
+    TIMES_ONLY=false
+    [[ "$BIN_MATCH" != true && "$RUNTIME_MATCH" == true && "$INNER_DIFF" -eq 0 ]] && TIMES_ONLY=true
+    [[ "$BIN_MATCH" == true && "$EXTRAS_DIFF" -eq 0 && "$NAME_MATCH" == true ]] && status=reproducible
     cat > "$RESULTS_FILE" << YAML_END
 script_version: ${SCRIPT_VERSION}
 verdict: ${status}
+hashes:
+  - ${APP_HASH}
 notes: |
   Built tag v${APP_VERSION} (${APP_COMMIT}) as release.yml job build-electron-linux does: Ubuntu 26.04,
   setup-node ${NODE_VERSION}, npm ci from the lockfile, electron-builder --linux, around the official
   ${SPECTERD_ZIP} (CI uses its own specterd artifact; the AppImage holds only its sha256 in
   version-data.json, so the specterd binary itself is verified by --type tarball, not here).
   Compared the AppImage in ${ASSET_NAME} byte for byte (official ${OFF_BIN_HASH}, built ${BLT_BIN_HASH});
-  if it differs, its runtime byte for byte and every squashfs entry's content, mode, owner, size and link
-  target, but not its timestamp (build-time mtimes). Plus udev rules and README; the tar.gz is not compared.
-  appimage=${BIN_MATCH} runtime=${RUNTIME_MATCH} squashfs_meta=${META_MATCH} squashfs_entries=${INNER_TOTAL} differ=${INNER_DIFF} extras_differ=${EXTRAS_DIFF} pinned_specterd=${PINNED:-unread} signature=${SIG_STATUS%% *}
+  only identical bytes count. On a difference, its runtime and every squashfs entry's content, mode, owner,
+  size and link target were compared (timestamps_only=true: those all match and only the build-time mtimes
+  differ). Plus udev rules and README; the tar.gz is not compared.
+  appimage=${BIN_MATCH} timestamps_only=${TIMES_ONLY} runtime=${RUNTIME_MATCH} squashfs_meta=${META_MATCH} squashfs_entries=${INNER_TOTAL} differ=${INNER_DIFF} extras_differ=${EXTRAS_DIFF} pinned_specterd=${PINNED:-unread} signature=${SIG_STATUS%% *}
 YAML_END
     display_results "$status"
 }
