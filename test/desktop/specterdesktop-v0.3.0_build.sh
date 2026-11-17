@@ -564,6 +564,8 @@ compare_tarball() {
     cat > "$RESULTS_FILE" << YAML_END
 script_version: ${SCRIPT_VERSION}
 verdict: ${status}
+hashes:
+  - ${APP_HASH}
 notes: |
   Built tag v${APP_VERSION} (${APP_COMMIT}) as release.yml job build-specterd-linux does: Ubuntu 26.04,
   setup-python ${PY_VERSION} at the toolcache path, the runner checkout path, apt and PyPI packages as of
@@ -631,6 +633,8 @@ compare_electron() {
     cat > "$RESULTS_FILE" << YAML_END
 script_version: ${SCRIPT_VERSION}
 verdict: ${status}
+hashes:
+  - ${APP_HASH}
 notes: |
   Built tag v${APP_VERSION} (${APP_COMMIT}) as release.yml job build-electron-linux does: Ubuntu 26.04,
   setup-node ${NODE_VERSION}, npm ci from the lockfile, electron-builder --linux, around the official
