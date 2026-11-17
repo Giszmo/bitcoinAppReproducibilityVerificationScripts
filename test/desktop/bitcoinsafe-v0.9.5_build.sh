@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ======================================================================================
-# bitcoinsafe-v0.9.4_build.sh - Bitcoin Safe Desktop Reproducible Build Verification
+# bitcoinsafe-v0.9.5_build.sh - Bitcoin Safe Desktop Reproducible Build Verification
 # ======================================================================================
-# Version:       v0.9.4
+# Version:       v0.9.5
 # Organization:  WalletScrutiny.com
-# Last Modified: 2026-10-15
+# Last modified by: Claude Code for Danny
+# Last modified on: 2026-11-12
 # Project:       https://github.com/andreasgriffin/bitcoin-safe
 # LICENSE: MIT License
 #
@@ -29,7 +30,7 @@ set -euo pipefail
 # ======================================================================================
 
 APP_ID="bitcoin.safe"
-SCRIPT_VERSION="v0.9.4"
+SCRIPT_VERSION="v0.9.5"
 REPO_URL="https://github.com/andreasgriffin/bitcoin-safe.git"
 RELEASE_BASE="https://github.com/andreasgriffin/bitcoin-safe/releases/download"
 
@@ -268,7 +269,7 @@ bootstrap_container() {
       # On every exit (also stop/interrupt): end the build, remove upstream build
       # containers that mount this workspace, publish the YAML (ftbfs if none; none
       # on exit 2 or a stop, since ABS publishes any verdict), and hand the workspace back.
-      W="$BS_WORKDIR"; Y="$W/COMPARISON_RESULTS.yaml"
+      W="$BS_WORKDIR"; Y="$W/verdict.yaml"
       finish() {
         local s=$?
         trap - EXIT INT TERM
@@ -277,8 +278,8 @@ bootstrap_container() {
           m=$(docker inspect -f "{{.Name}} {{range .Mounts}}{{.Source}}/ {{end}}" "$c" 2>/dev/null) || continue
           [[ "${m%% *}" != *"$BS_CNAME" && "$m" == *" $W/"* ]] && docker rm -f "$c" >/dev/null 2>&1
         done
-        [[ -f "$Y" || "$s" -eq 2 || "$s" -eq 130 ]] || printf "script_version: %s\nverdict: ftbfs\nnotes: |\n  Stopped or failed before a verdict (exit %s).\n" "$BS_SV" "$s" > "$Y"
-        [[ ! -f "$Y" ]] || { cp "$Y" "$BS_YAML_DIR/" && chown "$BS_OWNER" "$BS_YAML_DIR/COMPARISON_RESULTS.yaml"; } || s=1
+        # No verdict file means no verdict: never invent one (ABS publishes any YAML).
+        [[ ! -f "$Y" ]] || { cp "$Y" "$BS_YAML_DIR/COMPARISON_RESULTS.yaml" && chown "$BS_OWNER" "$BS_YAML_DIR/COMPARISON_RESULTS.yaml"; } || s=1
         if ! chown -R "$BS_OWNER" "$W"; then
           echo "ERROR: Failed to restore workspace ownership: $W" >&2
           [[ "$s" -ne 0 ]] || s=1
@@ -561,7 +562,7 @@ cleanup_wine_container() {
     fi
     grep -qx "$WINE_CONTAINER" <<<"$names" || break
     if (( waited >= timeout )); then
-      log_error "Container '$WINE_CONTAINER' still present after ${timeout}s; Docker may be wedged (try: sudo systemctl restart docker)"
+      log_error "Container '$WINE_CONTAINER' still present after ${timeout}s; Docker may be wedged (restart the Docker service)"
       return 1
     fi
     sleep 3
@@ -588,9 +589,9 @@ run_build() {
     # Poetry version from upstream's own poetry.lock (dev dependency) at this tag
     local pv
     pv=$(grep -A1 '^name = "poetry"$' poetry.lock 2>/dev/null | sed -n 's/^version = "\(.*\)"$/\1/p')
-    [[ -n "$pv" ]] || { log_error "Poetry version not found in poetry.lock"; exit 1; }
+    [[ -n "$pv" ]] || { log_error "Poetry version not found in poetry.lock"; exit 3; }
     log_info "Installing Poetry ${pv} (from poetry.lock)..."
-    pip3 install --user "poetry==${pv}" >/dev/null 2>&1 || { log_error "pip install poetry==${pv} failed"; exit 1; }
+    pip3 install --user "poetry==${pv}" >/dev/null 2>&1 || { log_error "pip install poetry==${pv} failed"; exit 3; }
     export PATH="$HOME/.local/bin:$PATH"
     log_info "Poetry version: $(poetry --version)"
 
@@ -631,8 +632,8 @@ run_build() {
       # invocations share one inode. Advisory flock works on a read fd and
       # creates no lock file (self-contained; nothing to .gitignore).
       exec 9<"${BS_SCRIPT_PATH:-$0}"
-      flock -w 1800 9 || { log_error "Timed out waiting for another Windows build"; exit 1; }
-      cleanup_wine_container || exit 1
+      flock -w 1800 9 || { log_error "Timed out waiting for another Windows build"; exit 3; }
+      cleanup_wine_container || exit 3
     fi
 
     log_info "Running: poetry run python tools/build.py --targets ${build_targets} --commit None"
@@ -640,15 +641,15 @@ run_build() {
       log_error "Build failed"
       exit 1
     }
-  )
-  build_rc=$?
+  ) 2>&1 | tee "$WORKDIR/build.log"
+  build_rc=${PIPESTATUS[0]}
 
   end_ts=$(date +%s)
   BUILD_DURATION=$(( end_ts - start_ts ))
 
   if [[ $build_rc -ne 0 ]]; then
     log_error "Build failed after ${BUILD_DURATION}s"
-    return 1
+    return "$build_rc"
   fi
 
   log_success "Build completed in ${BUILD_DURATION}s"
@@ -727,7 +728,7 @@ verify_official_signature() {
     log_success "$SIG_STATUS"
   else
     SIG_STATUS="SIGNATURE VERIFICATION FAILED (expected ${SIGNING_KEY_FPR})"
-    log_error "$SIG_STATUS"
+    fail_noverdict "$SIG_STATUS: the official file is not what the project signed."
   fi
   return 0
 }
@@ -757,12 +758,15 @@ strip_windows_signature() {
 
   # osslsigncode is installed in the bootstrap container (no sibling container needed).
   # Running it directly avoids Docker-socket permission issues when writing output files.
-  local strip_output
-  strip_output=$(osslsigncode remove-signature -in "$input_file" -out "$output_file" 2>&1) || true
+  # Start from no output file, so a leftover file cannot pass as a successful strip.
+  local strip_output strip_rc=0
+  rm -f "$output_file"
+  strip_output=$(osslsigncode remove-signature -in "$input_file" -out "$output_file" 2>&1) || strip_rc=$?
 
-  if [[ -f "$output_file" ]]; then
-    log_success "Signature stripped successfully"
+  if [[ "$strip_rc" -eq 0 && -s "$output_file" ]]; then
+    log_success "Signature stripped from $(basename "$input_file")"
   elif echo "$strip_output" | grep -qiE "does not have any signature|no signature found"; then
+    rm -f "$output_file"
     log_info "No signature found in $(basename "$input_file") - using file as-is"
     cp "$input_file" "$output_file"
   else
@@ -813,8 +817,9 @@ compare_artifacts() {
     log_info "Official SHA256 (pre-strip): $official_signed_hash"
     log_info "Built SHA256    (pre-strip): $built_signed_hash"
 
-    built_compare="${WORKDIR}/$(basename "$BUILT_FILE").stripped"
-    official_compare="${WORKDIR}/$(basename "$OFFICIAL_FILE").stripped"
+    # Separate names: the official and built files share one basename.
+    built_compare="${WORKDIR}/built.stripped.exe"
+    official_compare="${WORKDIR}/official.stripped.exe"
 
     strip_windows_signature "$BUILT_FILE" "$built_compare" || return 1
     strip_windows_signature "$OFFICIAL_FILE" "$official_compare" || return 1
@@ -1025,7 +1030,7 @@ compare_artifacts() {
 # ======================================================================================
 
 generate_comparison_yaml() {
-  local yaml_file="${WORKDIR}/COMPARISON_RESULTS.yaml"  # copied next to the script at exit
+  local yaml_file="${WORKDIR}/verdict.yaml"  # copied next to the script as COMPARISON_RESULTS.yaml at exit
 
   log_info "Generating COMPARISON_RESULTS.yaml..."
 
@@ -1046,13 +1051,13 @@ notes: |
     OSTree content comparison is required to determine if the application payload itself differs.
 EOF
 
-  log_success "COMPARISON_RESULTS.yaml generated: ${yaml_file}"
+  log_success "Verdict written: ${yaml_file} (copied next to the script as COMPARISON_RESULTS.yaml at exit)"
 }
 
 generate_error_yaml() {
   local error_status="$1"
   local error_msg="$2"
-  local yaml_file="${WORKDIR}/COMPARISON_RESULTS.yaml"  # copied next to the script at exit
+  local yaml_file="${WORKDIR}/verdict.yaml"  # copied next to the script as COMPARISON_RESULTS.yaml at exit
 
   log_info "Generating error COMPARISON_RESULTS.yaml..."
 
@@ -1109,6 +1114,22 @@ print_summary() {
   echo
 }
 
+fail_noverdict() {
+  log_error "$1"
+  log_error "No verdict: nothing about the source was decided, so no COMPARISON_RESULTS.yaml is written."
+  exit 1
+}
+
+# A failed build is ftbfs only when the source failed: tooling (exit 3) and
+# downloads that fail mid-build (pip, poetry, apt, docker pulls, git) give no verdict.
+fail_build() {
+  local rc="$1" net
+  [[ "$rc" -ne 3 ]] || fail_noverdict "Build tooling failed before building the source (exit 3)."
+  net="$(grep -m1 -i -E "Could not resolve host|Temporary failure in name resolution|Temporary failure resolving|Name or service not known|dial tcp|Network is unreachable|Connection (timed out|refused|reset)|Read timed out|Max retries exceeded|Failed to establish a new connection|TLS handshake|HTTP (error )?50[234]|The requested URL returned error: 5[0-9][0-9]|RPC failed|early EOF|unable to access 'https?://|Failed to fetch|failed to download|i/o timeout|TLS handshake timeout" "$WORKDIR/build.log" 2>/dev/null || true)"
+  [[ -z "$net" ]] || fail_noverdict "Build stopped by a network failure. First match: ${net:0:200}"
+  fail_ftbfs "Build process failed - see logs above"
+}
+
 fail_ftbfs() {
   log_error "$1"
   generate_error_yaml "ftbfs" "$1"
@@ -1128,6 +1149,7 @@ print_finding() {
 
 main() {
   # No stale YAML from an earlier run, also when parameters are invalid (exit 2)
+  [[ "${_INSIDE_CONTAINER:-}" == "1" ]] || log_info "Script: ${0##*/} ${SCRIPT_VERSION} sha256: ${SCRIPT_HASH}"
   [[ "${_INSIDE_CONTAINER:-}" == "1" ]] || rm -f "$SCRIPT_DIR/COMPARISON_RESULTS.yaml"
   parse_args "$@"
   map_build_config "$ARCH" "$BUILD_TYPE"
@@ -1135,22 +1157,21 @@ main() {
   # If not inside container, bootstrap and re-invoke
   if [[ "${_INSIDE_CONTAINER:-}" != "1" ]]; then
     [[ "$(id -u)" -ne 0 ]] || invalid "Run as a normal user, not root."
-    log_info "Script: ${0##*/} ${SCRIPT_VERSION} sha256: ${SCRIPT_HASH}"
     bootstrap_container
   fi
 
   setup_workspace
-  prepare_repository || fail_ftbfs "Could not clone or check out ${VERSION}"
-  download_official || fail_ftbfs "Failed to obtain official release artifact"
+  prepare_repository || fail_noverdict "Could not clone or check out ${VERSION} (network, or no such tag)"
+  download_official || fail_noverdict "Could not obtain the official release artifact"
   verify_official_signature
-  run_build || fail_ftbfs "Build process failed - see logs above"
+  run_build || fail_build "$?"
   find_built_artifact || fail_ftbfs "Build completed but artifact not found in dist/"
 
   local comparison_result=0
   compare_artifacts || comparison_result=$?
   # Comparison failed before any hash was computed (e.g. signature strip error)
   if [[ "$comparison_result" -ne 0 && -z "$BUILT_HASH" ]]; then
-    fail_ftbfs "Artifact comparison failed before hash computation - see logs above"
+    fail_noverdict "Artifact comparison failed before any hash was computed - see logs above"
   fi
 
   generate_comparison_yaml
