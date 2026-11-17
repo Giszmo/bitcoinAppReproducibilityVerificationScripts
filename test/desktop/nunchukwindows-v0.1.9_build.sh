@@ -1,9 +1,9 @@
 #!/bin/bash
 #
 # nunchukwindows_build.sh - Nunchuk Desktop Windows Reproducible Build Verifier
-# Version: v0.1.8
+# Version: v0.1.9
 # Last modified by: Danny Garcia, Carol (Buzz), Claude Code
-# Last modified on: 2026-10-21
+# Last modified on: 2026-11-17
 # Organization: WalletScrutiny.com
 # Project: https://github.com/nunchuk-io/nunchuk-desktop
 # LICENSE: MIT License
@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="v0.1.8"
+SCRIPT_VERSION="v0.1.9"
 APP_ID="nunchuk"
 APP_NAME="Nunchuk Desktop (Windows)"
 GH_REPO="nunchuk-io/nunchuk-desktop"
@@ -69,6 +69,7 @@ PHASE_T0=0
 REL_IMAGE_OS=""
 REL_IMAGE_VERSION=""
 REL_MSVC=""
+VS_REL=""
 
 NUNCHUK_RELEASE_KEY_FPR="8C8ECD3F660CA53CD878792A6E38A462ED2EF525"
 SIG_MANIFEST_STATUS="[WARNING] Manifest signature not checked"
@@ -85,8 +86,10 @@ log_ok()    { echo -e "${GREEN}[OK]${NC}  $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-die_invalid() { log_error "$1"; write_yaml "ftbfs" "$1"; exit "${EXIT_INVALID}"; }
+die_invalid() { log_error "$1"; NO_VERDICT_BY_DESIGN=true; exit "${EXIT_INVALID}"; }
 die_build()   { log_error "$1"; write_yaml "ftbfs" "$1"; exit "${EXIT_DIFF}"; }
+# Not a source build failure (network, VM, toolchain): no YAML (ABS B5).
+die_env()     { log_error "$1"; NO_VERDICT_BY_DESIGN=true; exit "${EXIT_DIFF}"; }
 # Environment cannot run the build at all (no KVM, golden image missing/expired): no verdict.
 die_prereq() {
     log_error "$1"
@@ -236,7 +239,7 @@ OPTIONAL ENVIRONMENT:
 
 REQUIREMENTS:
   podman (or docker), read/write /dev/kvm, read access to the golden image and the VM key.
-  Run as a normal user, not root. Tools missing from the golden image (VS Build Tools 17.14.41,
+  Run as a normal user, not root. Tools missing from the golden image (VS Build Tools 17.14.41/45,
   pwsh 7.6.6, Python 3.12.10, NASM 3.02, Strawberry Perl 5.32.1.1) are installed per run,
   hash-checked; their versions are asserted either way.
 
@@ -267,14 +270,14 @@ setup_workdir() {
         sleep 1
     done
     WORK_DIR=""
-    die_build "Could not create a per-run workspace under ${base}"
+    die_env "Could not create a per-run workspace under ${base}"
 }
 
 # EXIT trap: remove the VM container, hand the workspace back, delete vm/ (overlays, key copy).
 reclaim_workspace() {
     set +e
     if [[ "$VERDICT_WRITTEN" != true && "$NO_VERDICT_BY_DESIGN" != true ]]; then
-        write_yaml "ftbfs" "Run ended before a verdict was written (internal error)"
+        log_error "Run ended before a verdict (internal error); no COMPARISON_RESULTS.yaml written"
     fi
     [[ -n "$VM_NAME" ]] && "$CONTAINER_CMD" rm -f "$VM_NAME" > /dev/null 2>&1
     [[ -n "$SSH_HELPER" ]] && "$CONTAINER_CMD" rm -f "$SSH_HELPER" > /dev/null 2>&1
@@ -334,7 +337,7 @@ prepare_official() {
         elif [[ "$a" == portable || " ${ARTIFACTS[*]} " == *" $a "* ]]; then
             url="https://github.com/${GH_REPO}/releases/download/${APP_VERSION}/${OFF_NAME[$a]}"
             log_info "Downloading official release: $url"
-            gh_wget "$dest" "$url" || die_build "Failed to download: $url"
+            gh_wget "$dest" "$url" || die_env "Failed to download: $url"
         else
             continue
         fi
@@ -343,11 +346,16 @@ prepare_official() {
     done
     # shellcheck disable=SC2016
     tools_c sh -c 'unzip -p "$1" build-info.json > official/build-info.json' sh "official/${OFF_NAME[portable]}" \
-        || die_build "The official portable ZIP has no build-info.json"
+        || die_env "The official portable ZIP has no build-info.json"
     REL_IMAGE_OS="$(sed -nE 's/.*"runnerImage": *"([^"]*)".*/\1/p' "${WORK_DIR}/official/build-info.json")"
     REL_IMAGE_VERSION="$(sed -nE 's/.*"runnerImageVersion": *"([^"]*)".*/\1/p' "${WORK_DIR}/official/build-info.json")"
     REL_MSVC="$(sed -nE 's/.*"msvcFileVersion": *"([^"]*)".*/\1/p' "${WORK_DIR}/official/build-info.json")"
-    [[ "$REL_MSVC" =~ ^[0-9.]+$ ]] || die_build "Could not read msvcFileVersion from the official build-info.json"
+    # Keep in sync with $vs in nw.ps1.
+    case "$REL_MSVC" in
+        19.44.35229.0) VS_REL=17.14.41 ;;
+        19.44.35230.0) VS_REL=17.14.45 ;;
+        *) die_env "No VS Build Tools pinned for the release's cl.exe '${REL_MSVC}' (msvcFileVersion)" ;;
+    esac
     log_info "Release built on runner ${REL_IMAGE_OS:-?} ${REL_IMAGE_VERSION:-?} with cl.exe ${REL_MSVC}"
     if [[ -n "$REL_IMAGE_OS$REL_IMAGE_VERSION" ]]; then
         log_warn "build-info.json records GitHub's runner image; this build cannot reproduce that (see Warnings)"
@@ -398,7 +406,7 @@ resolve_commit() {
         "refs/tags/${APP_VERSION}^{}" "refs/tags/${APP_VERSION}" 2>/dev/null || true)"
     RESOLVED_COMMIT="$(printf '%s\n' "$out" | awk 'END{print $1}')"
     [[ "$RESOLVED_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
-        || die_build "Could not resolve tag ${APP_VERSION} to a commit; refusing to attribute a build to it"
+        || die_env "Could not resolve tag ${APP_VERSION} to a commit; refusing to attribute a build to it"
     log_ok "Tag ${APP_VERSION} = commit ${RESOLVED_COMMIT}"
 }
 
@@ -415,7 +423,7 @@ vm_ssh() {
 # A failed copy is an ftbfs, except while diffing a known mismatch (COPY_SOFT=true):
 # then it only warns, so the verdict stays not_reproducible.
 COPY_SOFT=false
-copy_fail() { [[ "$COPY_SOFT" == true ]] && { log_warn "$1"; return 1; }; die_build "$1"; }
+copy_fail() { [[ "$COPY_SOFT" == true ]] && { log_warn "$1"; return 1; }; die_env "$1"; }
 # Copy a host file into the VM, then check its sha256 inside Windows.
 vm_push() {
     local src="$1" dst="$2" got
@@ -451,7 +459,7 @@ start_vm() {
         "$CONTAINER_CMD" run --rm "${extra[@]}" --entrypoint qemu-img \
             -v "${GOLDEN_DIR}/storage:/golden:ro" -v "${GOLDEN_DIR}/storage2:/golden2:ro" -v "${WORK_DIR}/vm:/vm" \
             "$WIN_IMAGE" create -q -f qcow2 -F qcow2 -b "${mnt}/${disk##*/}" "/vm/${disk}" \
-            || die_build "Could not create the qcow2 overlay for ${disk}"
+            || die_env "Could not create the qcow2 overlay for ${disk}"
     done
     log_info "Starting Windows VM ${VM_NAME} (RAM ${VM_RAM}, 4 cores)..."
     "$CONTAINER_CMD" run -d --name "$VM_NAME" "${extra[@]}" \
@@ -459,15 +467,15 @@ start_vm() {
         -v "${WORK_DIR}/vm/storage:/storage" -v "${WORK_DIR}/vm/storage2:/storage2" \
         -v "${GOLDEN_DIR}/storage:/golden:ro" -v "${GOLDEN_DIR}/storage2:/golden2:ro" \
         -p 127.0.0.1::22 --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --stop-timeout 120 \
-        "$WIN_IMAGE" > /dev/null || die_build "Could not start the Windows VM container"
+        "$WIN_IMAGE" > /dev/null || die_env "Could not start the Windows VM container"
     VM_PORT="$("$CONTAINER_CMD" port "$VM_NAME" 22/tcp | head -1)"; VM_PORT="${VM_PORT##*:}"
-    [[ "$VM_PORT" =~ ^[0-9]+$ ]] || die_build "Could not read the VM's SSH port"
+    [[ "$VM_PORT" =~ ^[0-9]+$ ]] || die_env "Could not read the VM's SSH port"
     for _ in $(seq 1 90); do
         vm_ssh "type C:\\OEM\\done.txt" > /dev/null 2>&1 && { log_ok "Windows is up (SSH on 127.0.0.1:${VM_PORT})"; phase_done "VM boot"; return 0; }
-        "$CONTAINER_CMD" ps -q --filter "name=${VM_NAME}" | grep -q . || die_build "The VM container exited during boot"
+        "$CONTAINER_CMD" ps -q --filter "name=${VM_NAME}" | grep -q . || die_env "The VM container exited during boot"
         sleep 10
     done
-    die_build "Windows did not answer over SSH within 15 min"
+    die_env "Windows did not answer over SSH within 15 min"
 }
 
 # Runs inside Windows. Starts under PowerShell 5.1, installs pwsh 7 if needed, then re-runs itself
@@ -523,11 +531,17 @@ if ($Phase -eq 'build') {
         Expand-Archive (Get-Pinned 'https://strawberryperl.com/download/5.32.1.1/strawberry-perl-5.32.1.1-64bit-portable.zip' '692646105b0f5e058198a852dc52a48f1cebcaf676d63bbdeae12f4eaee9bf5c') 'C:\Strawberry'
     }
     $vsw = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    function VsPath { if (Test-Path $vsw) { & $vsw -products * -version '[17.14.37710,17.14.37711)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CoreBuildTools Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath | Select-Object -First 1 } }
+    # VS with the release's cl.exe: download id, bootstrapper/installer sha256, vswhere range. Without
+    # --offline the bootstrapper takes the newest installer (VS 2026 since 2026-11-11): exit 5008.
+    $vs = @{ '19.44.35229.0' = 'bc92e2cb-33de-4a0c-995d-efa817f16b16', '37bb0fb429d163ecebd272a865d11a37b906d152bef960da2ddb29c2e2fd6eeb', 'E7A630D8BBE402A3A221F7D6ECFDC2A21A1711BCE7ED933FB1A8999C8D5C565C', '[17.14.37710,17.14.37711)'
+        '19.44.35230.0' = '95995f57-8355-4ff5-8d90-a7e1669fb3b3', '310c13b8238876afb4e823a91112230ee2d2c5a45c431d4062af7aadedff9c4c', 'F5C892222A82F790498BFFFB69092EC14506FA8E9B8465033386CB2F30E17C0A', '[17.14.37906,17.14.37907)' }[$Arg3]
+    Need $vs "no VS Build Tools pinned for cl.exe $Arg3"
+    $dl = "https://download.visualstudio.microsoft.com/download/pr/$($vs[0])"
+    function VsPath { if (Test-Path $vsw) { & $vsw -products * -version $vs[3] -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CoreBuildTools Microsoft.VisualStudio.Component.VC.CMake.Project -property installationPath | Select-Object -First 1 } }
     if (!(VsPath)) {
-        # Fixed-version bootstrapper for VS 17.14.41 (17.14.37710.0), the windows-2022 runner's VS.
-        $p = Start-Process (Get-Pinned 'https://download.visualstudio.microsoft.com/download/pr/bc92e2cb-33de-4a0c-995d-efa817f16b16/37bb0fb429d163ecebd272a865d11a37b906d152bef960da2ddb29c2e2fd6eeb/vs_BuildTools.exe' '37bb0fb429d163ecebd272a865d11a37b906d152bef960da2ddb29c2e2fd6eeb') -Wait -PassThru `
-            -ArgumentList '--quiet', '--wait', '--norestart', '--nocache', '--add', 'Microsoft.VisualStudio.Workload.VCTools', `
+        $opc = Get-Pinned "$dl/$($vs[2])/vs_installer.opc" $vs[2]
+        $p = Start-Process (Get-Pinned "$dl/$($vs[1])/vs_BuildTools.exe" $vs[1]) -Wait -PassThru `
+            -ArgumentList '--quiet', '--wait', '--norestart', '--nocache', '--offline', $opc, '--add', 'Microsoft.VisualStudio.Workload.VCTools', `
             '--add', 'Microsoft.VisualStudio.Component.VC.CoreBuildTools', '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', `
             '--add', 'Microsoft.VisualStudio.Component.VC.CMake.Project', `
             '--add', 'Microsoft.VisualStudio.Component.VC.Redist.14.Latest', '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.22621'
@@ -537,17 +551,15 @@ if ($Phase -eq 'build') {
     }
     # Same layering as the runner: msvc-dev-cmd's vcvars, then Python and NASM, Strawberry Perl last.
     $env:Path = "$py;$py\Scripts;$T\nasm-3.02;$env:Path;C:\Strawberry\c\bin;C:\Strawberry\perl\site\bin;C:\Strawberry\perl\bin"
-    # vcpkg builds ports in a clean environment that takes PATH from the registry, not from this
-    # session. With VCPKG_FORCE_SYSTEM_BINARIES it must find pip's ninja there, or it falls back to
-    # MSBuild (sqlite3 then fails: RC2135 sqlite370.ico). The runner has these on the machine PATH.
+    # vcpkg ports take PATH from the registry: without pip's ninja there (VCPKG_FORCE_SYSTEM_BINARIES) they
+    # fall back to MSBuild and sqlite3 fails (RC2135 sqlite370.ico). The runner has these on the machine PATH.
     $need = @($py, "$py\Scripts", "$T\nasm-3.02", 'C:\Strawberry\c\bin', 'C:\Strawberry\perl\site\bin', 'C:\Strawberry\perl\bin')
     $mp = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $add = $need | Where-Object { ($mp -split ';') -notcontains $_ }
     if ($add) { [Environment]::SetEnvironmentVariable('Path', (@($mp.TrimEnd(';')) + $add) -join ';', 'Machine') }
     $mp = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     foreach ($d in $need) { Need (($mp -split ';') -contains $d) "machine PATH lacks $d" }
-    # vcpkg sets up each port with vcvarsall, which adds VS's bundled Ninja (VC.CMake.Project). Without it
-    # vcpkg falls back to MSBuild and sqlite3 fails (RC2135 sqlite370.ico). The runner's full VS has it.
+    # vcvarsall gives each vcpkg port VS's bundled Ninja (VC.CMake.Project); same MSBuild fallback otherwise.
     Need (Test-Path "$(VsPath)\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe") "VS bundled ninja.exe missing (VC.CMake.Project)"
     Set-Content C:\nw\env.cmd "@call `"$(VsPath)\VC\Auxiliary\Build\vcvarsall.bat`" x64 10.0.22621.0 -vcvars_ver=14.44.35207 >nul`r`n@set" -Encoding ascii
     cmd /c C:\nw\env.cmd | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2]) } }
@@ -622,8 +634,9 @@ run_build() {
     wait $!
     set -e
     grep -q '^NW-BUILD-DONE' "${WORK_DIR}/build.log" || {
-        grep -q 'Toolchain check failed' "${WORK_DIR}/build.log" \
-            && die_build "Windows toolchain does not match the release's: $(grep -m1 -o 'Toolchain check failed.*' "${WORK_DIR}/build.log")"
+        # Stopped before the toolchain passed: not an ftbfs. [^$] skips pwsh's echo of the throw line.
+        grep -q '^Toolchain: PASS' "${WORK_DIR}/build.log" \
+            || die_env "Windows toolchain setup failed (build.log in the workspace): $(grep -m1 -oE '(Toolchain check failed|sha256 mismatch): [^$].*' "${WORK_DIR}/build.log" | cut -c1-200)"
         die_build "Upstream Windows build failed: $(grep -m1 -o 'NW-FAIL .*' "${WORK_DIR}/build.log" | cut -c1-200) (log with vcpkg/CMake tails: build.log in the workspace)"
     }
     SOURCE_EPOCH="$(sed -nE 's/^NW-BUILD-DONE epoch=([0-9]+).*/\1/p' "${WORK_DIR}/build.log")"
@@ -697,7 +710,7 @@ compare_artifacts() {
         fi
     done
     phase_done "compare"
-    local ctx="Built in a Windows Server 2022 VM (${WIN_IMAGE##*@}) with upstream build_windows.ps1 and package_windows.ps1 at tag ${APP_VERSION}, commit ${RESOLVED_COMMIT}, SOURCE_DATE_EPOCH ${SOURCE_EPOCH}; MSVC 14.44.35207 (cl ${REL_MSVC}), SDK 10.0.22621.0, VS 17.14.41; ImageOS/ImageVersion not set: build-info.json records GitHub's runner image (${REL_IMAGE_OS:-none}/${REL_IMAGE_VERSION:-none} in the release), which no build outside GitHub can match (upstream leak)."
+    local ctx="Built in a Windows Server 2022 VM (${WIN_IMAGE##*@}) with upstream build_windows.ps1 and package_windows.ps1 at tag ${APP_VERSION}, commit ${RESOLVED_COMMIT}, SOURCE_DATE_EPOCH ${SOURCE_EPOCH}; MSVC 14.44.35207 (cl ${REL_MSVC}), SDK 10.0.22621.0, VS ${VS_REL}; ImageOS/ImageVersion not set: build-info.json records GitHub's runner image (${REL_IMAGE_OS:-none}/${REL_IMAGE_VERSION:-none} in the release), which only GitHub can match (upstream leak)."
     local sums="" a2
     for a2 in "${ARTIFACTS[@]}"; do sums+="${OFF_NAME[$a2]}: official ${OFF_SHA[$a2]}, rebuilt ${BUILT_SHA[$a2]}${DIFF_NOTE[$a2]:+ (${DIFF_NOTE[$a2]})}; "; done
     if [[ "$all" == true ]]; then
@@ -762,12 +775,10 @@ emit_verification_summary() {
     echo "VM image:       ${WIN_IMAGE}"
     echo "golden image:   ${GOLDEN_DIR}"
     echo "release runner: ${REL_IMAGE_OS:-?} ${REL_IMAGE_VERSION:-?}, cl.exe ${REL_MSVC} (runner fields not reproduced, see Warnings)"
-    echo "toolchain:      VS Build Tools 17.14.41, MSVC 14.44.35207, SDK 10.0.22621.0, pwsh 7.6.6, Python 3.12.10, NASM 3.02, Strawberry Perl 5.32.1.1"
-    echo "                cl.exe is checked against the release's build-info.json. build-info.json does not record"
-    echo "                Python, NASM or Perl: those are from upstream's CI job logs (2.9.1 run 38044363978, 2.9.2 run 40099229609:"
-    echo "                'Successfully set up CPython (3.12.10)', 'nasm v3.2.0', 'NASM version 3.02', C:\\Strawberry perl)"
-    echo "                and the runner toolset (strawberryperl 5.32.1.1)."
-    [[ "$APP_VERSION" == 2.9.[12] ]] || echo "[WARNING] Toolchain versions were confirmed for 2.9.1 and 2.9.2 only; check them against this release's CI run"
+    echo "toolchain:      VS Build Tools ${VS_REL}, MSVC 14.44.35207, SDK 10.0.22621.0, pwsh 7.6.6, Python 3.12.10, NASM 3.02, Strawberry Perl 5.32.1.1"
+    echo "                cl.exe is checked against build-info.json; Python, NASM and Perl against upstream's CI logs"
+    echo "                (runs 38044363978, 40099229609, 41083969010, 43581994636 for 2.9.1 to 2.9.4) and runner toolsets."
+    [[ "$APP_VERSION" == 2.9.[1-4] ]] || echo "[WARNING] Toolchain versions were confirmed for 2.9.1 to 2.9.4 only; check them against this release's CI run"
     echo ""
     echo "Elapsed time per phase:"
     printf '%s' "$PHASE_TIMES"
@@ -775,7 +786,7 @@ emit_verification_summary() {
     echo "Limitations:"
     echo "- pip resolves aqtinstall's and py7zr's dependencies at run time (upstream pins only aqtinstall, py7zr, ninja)."
     echo "- VS Build Tools payloads are checked only by the VS installer against Microsoft's signed manifest;"
-    echo "  the script checks the bootstrapper's sha256 and asserts the resulting cl/CRT/SDK versions."
+    echo "  the script checks the bootstrapper's and installer's sha256 and asserts the resulting cl/CRT/SDK versions."
     echo "- Qt (aqt from download.qt.io) and vcpkg sources are verified by those tools, not by this script."
     echo "- Built under user Docker, time zone set to UTC; the release was built as runneradmin on GitHub's runner."
     echo "- The bundled hwi.exe is a prebuilt download pinned by sha256 in windows-dependencies.lock.json, not built from source."
