@@ -1,72 +1,66 @@
 #!/bin/bash
+# bitkit-v0.3.8_build.sh - Bitkit (to.bitkit) Android reproducible build verification
+# Version:       v0.3.8
+# Organization:  WalletScrutiny.com
+# Last modified by: Claude Code for Danny
+# Last modified on: 2026-11-13
+# Project:       https://github.com/synonymdev/bitkit-android
+# DISCLAIMER: examine this script before running it. It is provided as-is, without warranty,
+# and may contain bugs. It runs containers, downloads source and builds (CPU, RAM, disk heavy).
+# SUMMARY: builds an image (JDK 17, SDK 36, NDK, bundletool); clones the version tag in a
+# container and runs bundleMainnetRelease; makes Play's SDK 32+ splits from a copy of the AAB
+# (sparseEncoding=VARIANT_FOR_SDK_32) with bundletool; compares them split by split with the
+# official Play splits given by --binary; writes COMPARISON_RESULTS.yaml next to the script.
 set -euo pipefail
+SCRIPT_HASH="$(sha256sum "$(readlink -f "$0")" 2>/dev/null | cut -d' ' -f1)" || true
+echo "[INFO] Script: ${0##*/} v0.3.8 sha256: ${SCRIPT_HASH:=N/A}"
 EXEC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly EXEC_DIR
-readonly WORK_DIR_PREFIX="workdir"
-readonly SCRIPT_VERSION="v0.3.6"
-readonly SCRIPT_NAME="bitkit_build.sh"
+readonly WORK_DIR_PREFIX="bitkit_verification"
+readonly RUN_ID="$(date +%s)-$$"
+readonly CALLER_DIR="$(pwd -P)"
+readonly SCRIPT_VERSION="v0.3.8"
+readonly SCRIPT_NAME="bitkit-v0.3.8_build.sh"
 readonly APP_ID="to.bitkit"
 readonly REPO_URL="https://github.com/synonymdev/bitkit-android.git"
-readonly BUILD_IMAGE="bitkitwallet_build_env:3"
-readonly BUNDLETOOL_VERSION="1.17.2"
+readonly BUILD_IMAGE="bitkitwallet_build_env:5"
+readonly NDK_VERSION="28.1.13356709"  # upstream release.yml NDK_VERSION
+readonly BUNDLETOOL_VERSION="1.18.3"  # = bundletool that AGP used to build the AAB
 readonly EXIT_SUCCESS=0
 readonly EXIT_FAILED=1
 readonly EXIT_INVALID=2
-VERSION=""            # version string, e.g. "2.1.1"
-ARCH=""               # ABI string, e.g. "arm64-v8a"
-TYPE=""               # accepted silently for ABS compatibility, unused
-APK_INPUT=""          # path to user-supplied official split APK, directory, or zip
-INPUT_IS_DIR=false    # true when --binary points to a directory
-INPUT_IS_ZIP=false    # true when --binary points to a .zip (WalletScrutiny Blossom upload)
-INPUT_IS_TAR=false    # true when --binary points to a .tar.gz/.tar (WalletScrutiny Blossom upload)
-WORK_DIR=""           # ${EXEC_DIR}/workdir_to.bitkit_<version>_<arch>
-CONTAINER_CMD=""      # "podman" or "docker"
+VERSION=""
+ARCH=""
+TYPE=""
+APK_INPUT=""
+INPUT_IS_DIR=false
+INPUT_IS_ZIP=false
+INPUT_IS_TAR=false
+WORK_DIR=""
+CONTAINER_CMD=""
 CONTAINER_RUN_EXTRA=""
 VOLUME_RO=":ro"
 VOLUME_RW=""
-github_token=""       # GitHub PAT with read:packages scope
+github_token=""
 should_cleanup=false
-VERSION_SAFE=""       # VERSION with characters safe for directory names
-ARCH_SAFE=""          # ARCH with hyphens replaced by underscores
-OFFICIAL_APK=""       # canonical path of the primary input APK in WORK_DIR
-OFFICIAL_BASE_APK=""  # path to base.apk for metadata (versionName, versionCode)
-BUILT_AAB=""          # path to the AAB produced by bundleMainnetRelease
-GIT_TAG=""            # resolved git tag, e.g. "v2.1.1"
-RESULT_DONE=false     # set true after COMPARISON_RESULTS.yaml is written
-TOTAL_DIFFS=1         # default to "failed" until extract_and_compare() runs cleanly
+VERSION_SAFE=""
+ARCH_SAFE=""
+OFFICIAL_APK=""
+OFFICIAL_BASE_APK=""
+BUILT_AAB=""
+GIT_TAG=""
+RESULT_DONE=false
+TOTAL_DIFFS=1
 log_info()  { echo "[INFO] $*"; }
 log_pass()  { echo "[PASS] $*"; }
 log_fail()  { echo "[FAIL] $*"; }
 log_warn()  { echo "[WARNING] $*"; }
-work_dir_path() {
-    local version_part="$1"
-    local arch_part="$2"
-    printf '%s/%s_%s_%s_%s\n' \
-        "${EXEC_DIR}" \
-        "${WORK_DIR_PREFIX}" \
-        "${APP_ID}" \
-        "${version_part}" \
-        "${arch_part}"
+work_dir_path() {  # $(pwd -P)/bitkit_verification_<version>_<arch>_<epoch>-<pid>
+    printf '%s/%s_%s_%s_%s\n' "${CALLER_DIR}" "${WORK_DIR_PREFIX}" "$1" "$2" "${RUN_ID}"
 }
 write_yaml_outputs() {
     local content="$1"
     printf '%s\n' "${content}" > "${EXEC_DIR}/COMPARISON_RESULTS.yaml"
-    if [[ -n "${WORK_DIR:-}" && -d "${WORK_DIR}" ]]; then
-        printf '%s\n' "${content}" > "${WORK_DIR}/COMPARISON_RESULTS.yaml" || true
-    fi
-}
-generate_error_yaml() {
-    local status="$1"
-    local notes="${2:-}"
-    if [[ -n "${notes}" ]]; then
-        write_yaml_outputs "script_version: ${SCRIPT_VERSION}
-verdict: ${status}
-notes: |
-  ${notes}"
-    else
-        write_yaml_outputs "script_version: ${SCRIPT_VERSION}
-verdict: ${status}"
-    fi
 }
 generate_comparison_yaml() {
     local verdict="$1"
@@ -77,27 +71,17 @@ notes: |
   ${notes}"
     log_info "Generated COMPARISON_RESULTS.yaml (verdict: ${verdict})"
 }
+# Failures here are not verdicts: no YAML (ABS would publish it). ftbfs is written only in build().
 on_error() {
     local exit_code=$?
-    local line_no=$1
     set +e
-    log_fail "Script failed at line ${line_no} (exit code ${exit_code})"
-    if [[ "${RESULT_DONE}" != "true" ]]; then
-        generate_error_yaml "ftbfs" || true
-    fi
+    log_fail "Script failed at line $1 (exit code ${exit_code}); no verdict written"
+    [[ -n "${WORK_DIR:-}" ]] && log_warn "Work directory preserved: ${WORK_DIR}"
     echo "Exit code: ${EXIT_FAILED}"
     exit "${EXIT_FAILED}"
 }
-cleanup_on_error() {
-    local exit_code=$?
-    if [[ "${exit_code}" -ne 0 && "${RESULT_DONE}" != "true" && -n "${WORK_DIR:-}" ]]; then
-        log_warn "Script failed with exit code: ${exit_code}"
-        log_warn "Work directory preserved: ${WORK_DIR}"
-        generate_error_yaml "ftbfs" || true
-    fi
-}
 trap 'on_error $LINENO' ERR
-trap 'cleanup_on_error'  EXIT
+trap 'echo "Stopped."; echo "Exit code: 130"; exit 130' INT TERM
 detect_container_runtime() {
     if command -v podman >/dev/null 2>&1; then
         CONTAINER_CMD="podman"
@@ -112,12 +96,6 @@ detect_container_runtime() {
         CONTAINER_RUN_EXTRA="--user $(id -u):$(id -g)"
         log_info "Using docker as container runtime"
     else
-        cat > "${EXEC_DIR}/COMPARISON_RESULTS.yaml" <<EOF
-script_version: ${SCRIPT_VERSION}
-verdict: ftbfs
-notes: |
-  Neither podman nor docker found on host. Install one to continue.
-EOF
         echo "[ERROR] Neither podman nor docker is available."
         echo "Exit code: ${EXIT_FAILED}"
         exit "${EXIT_FAILED}"
@@ -158,32 +136,8 @@ container_aapt_version() {
         -e "APK_NAME=${apk_name}" \
         -e "FIELD=${field}" \
         "${BUILD_IMAGE}" \
-        bash -c '
-            out="$(aapt dump badging "/apk/${APK_NAME}" 2>/dev/null \
-                || aapt2 dump badging "/apk/${APK_NAME}" 2>/dev/null \
-                || true)"
-            if [ -n "$out" ]; then
-                result="$(printf "%s\n" "$out" \
-                    | sed -n "s/.*${FIELD}='"'"'\([^'"'"']*\)'"'"'.*/\1/p" \
-                    | head -n1)"
-                if [ -n "$result" ]; then
-                    printf "%s\n" "$result"
-                    exit 0
-                fi
-            fi
-            tmpdir="$(mktemp -d)"
-            if apktool d -f -s -o "${tmpdir}/out" "/apk/${APK_NAME}" >/dev/null 2>&1; then
-                case "${FIELD}" in
-                    versionName)
-                        sed -n "s/^[[:space:]]*versionName:[[:space:]]*//p" \
-                            "${tmpdir}/out/apktool.yml" | head -n1 ;;
-                    versionCode)
-                        sed -n "s/^[[:space:]]*versionCode:[[:space:]]*'"'"'\([^'"'"']*\)'"'"'/\1/p" \
-                            "${tmpdir}/out/apktool.yml" | head -n1 ;;
-                esac
-            fi
-            rm -rf "${tmpdir}"
-        ' 2>/dev/null || true
+        bash -c 'aapt dump badging "/apk/${APK_NAME}" 2>/dev/null \
+            | sed -n "s/.*${FIELD}='"'"'\([^'"'"']*\)'"'"'.*/\1/p" | head -n1' 2>/dev/null || true
 }
 canonicalize_split_apk_name() {
     local apk_name="$1"
@@ -195,36 +149,17 @@ canonicalize_split_apk_name() {
     esac
 }
 resolve_built_split_apk() {
-    local official_apk="$1"
-    local built_dir="$2"
-    local official_name canonical_name
-    official_name="$(basename "${official_apk}")"
-    if [[ -f "${built_dir}/${official_name}" ]]; then
-        echo "${built_dir}/${official_name}"
-        return 0
-    fi
-    canonical_name="$(canonicalize_split_apk_name "${official_name}")"
-    if [[ -f "${built_dir}/${canonical_name}" ]]; then
-        echo "${built_dir}/${canonical_name}"
-        return 0
-    fi
+    local n f; n="$(basename "$1")"
+    for f in "$2/${n}" "$2/$(canonicalize_split_apk_name "${n}")"; do
+        [[ -f "${f}" ]] && { echo "${f}"; return 0; }
+    done
     return 1
 }
 find_official_base_apk() {
-    local dir="${WORK_DIR}/official-split-apks"
-    if [[ -f "${dir}/base.apk" ]]; then
-        echo "${dir}/base.apk"
-        return
-    fi
-    if [[ -f "${dir}/base-master.apk" ]]; then
-        echo "${dir}/base-master.apk"
-        return
-    fi
-    local matches=("${dir}"/base*.apk)
-    if [[ ${#matches[@]} -gt 0 && -f "${matches[0]}" ]]; then
-        echo "${matches[0]}"
-        return
-    fi
+    local f
+    for f in "${WORK_DIR}/official-split-apks"/{base.apk,base-master.apk} "${WORK_DIR}/official-split-apks"/base*.apk; do
+        [[ -f "${f}" ]] && { echo "${f}"; return; }
+    done
 }
 create_device_spec() {
     local output_path="$1"
@@ -239,6 +174,65 @@ create_device_spec() {
 EOF
     log_info "device-spec.json created (arch=${arch}, screenDensity=480, sdkVersion=36, supportedLocales=[en])"
 }
+write_java_tools() {
+    mkdir -p "${WORK_DIR}/tools"
+    # SetSparse: copy the AAB entry by entry; only BundleConfig.pb changes.
+    cat > "${WORK_DIR}/tools/SetSparse.java" <<'JEOF'
+import java.io.*; import java.util.*; import java.util.zip.*; import com.android.bundle.Config.*;
+public class SetSparse { public static void main(String[] a) throws Exception {
+  try (ZipFile in = new ZipFile(a[0]); ZipOutputStream out = new ZipOutputStream(new FileOutputStream(a[1]))) {
+    for (Enumeration<? extends ZipEntry> en = in.entries(); en.hasMoreElements();) {
+      ZipEntry e = en.nextElement(); byte[] b = in.getInputStream(e).readAllBytes();
+      if (e.getName().equals("BundleConfig.pb")) {
+        BundleConfig.Builder c = BundleConfig.parseFrom(b).toBuilder();
+        ResourceOptimizations.Builder r = c.getOptimizationsBuilder().getResourceOptimizationsBuilder();
+        System.out.println("BundleConfig sparseEncoding: " + r.getSparseEncoding() + " -> VARIANT_FOR_SDK_32");
+        r.setSparseEncoding(ResourceOptimizations.SparseEncoding.VARIANT_FOR_SDK_32);
+        b = c.build().toByteArray(); }
+      ZipEntry o = new ZipEntry(e.getName()); o.setTime(e.getTime());
+      if (e.getMethod() == ZipEntry.STORED) { CRC32 k = new CRC32(); k.update(b);
+        o.setMethod(ZipEntry.STORED); o.setSize(b.length); o.setCompressedSize(b.length); o.setCrc(k.getValue()); }
+      out.putNextEntry(o); out.write(b); out.closeEntry(); } } } }
+JEOF
+    # ArscCheck: Play writes ResTable_typeSpec.typesCount (number of ResTable_type chunks that
+    # follow); bundletool writes 0. Zero that field on both sides only where it equals the real
+    # count, then compare every byte. Exit 0 only if nothing else differs.
+    cat > "${WORK_DIR}/tools/ArscCheck.java" <<'JEOF'
+import java.nio.*; import java.nio.file.*;
+public class ArscCheck {
+  static int fix(ByteBuffer d, int s, int n) { int tc = d.getShort(s + 10) & 0xffff;
+    if (tc != 0 && tc != n) throw new IllegalStateException("typesCount " + tc + " != " + n + " type chunks");
+    d.putShort(s + 10, (short) 0); return tc != 0 ? 1 : 0; }
+  static int mask(ByteBuffer d) { int k = 0, p = d.getShort(2) & 0xffff;
+    while (p < d.capacity()) { int t = d.getShort(p) & 0xffff, h = d.getShort(p + 2) & 0xffff, z = d.getInt(p + 4);
+      if (t == 0x200) { int q = p + h, s = -1, n = 0;
+        while (q < p + z) { int c = d.getShort(q) & 0xffff;
+          if (c == 0x202) { if (s >= 0) k += fix(d, s, n); s = q; n = 0; } else if (c == 0x201 && s >= 0) n++;
+          q += d.getInt(q + 4); }
+        if (s >= 0) k += fix(d, s, n); }
+      p += z; }
+    return k; }
+  public static void main(String[] a) throws Exception {
+    ByteBuffer o = ByteBuffer.wrap(Files.readAllBytes(Paths.get(a[0]))).order(ByteOrder.LITTLE_ENDIAN);
+    ByteBuffer b = ByteBuffer.wrap(Files.readAllBytes(Paths.get(a[1]))).order(ByteOrder.LITTLE_ENDIAN);
+    int no = mask(o), nb = mask(b); boolean same = o.equals(b);
+    System.out.println(same ? "typesCount only: set in " + no + " official / " + nb + " built typeSpecs, each equal to its type-chunk count; all other bytes identical"
+                            : "resources.arsc bytes differ beyond typesCount");
+    System.exit(same ? 0 : 1); } }
+JEOF
+    # play_meta.awk: move the meta-data Google Play adds (exact names/values) out of the
+    # OFFICIAL manifest dump into the -v out file, which the log prints.
+    cat > "${WORK_DIR}/tools/play_meta.awk" <<'AEOF'
+function ok(s) { return (s ~ /"com\.android\.stamp\.source"/ && s ~ /="https:\/\/play\.google\.com\/store"/) ||
+  (s ~ /"com\.android\.stamp\.type"/ && s ~ /="STAMP_TYPE_DISTRIBUTION_APK"/) ||
+  (s ~ /"com\.android\.vending\.derived\.apk\.id"/ && s ~ /=\(type 0x10\)0x[0-9a-f]+$/) }
+function flush() { if (held) print buf; held = 0 }
+/^ *E: meta-data/ { flush(); held = 1; buf = $0; n = 1; next }
+held { buf = buf "\n" $0; if (++n == 3) { if (ok(buf)) { print buf > out; held = 0 } else flush() } next }
+{ print }
+END { flush() }
+AEOF
+}
 extract_split_apks_from_aab() {
     local aab_path="$1"
     local device_spec_path="$2"
@@ -249,7 +243,15 @@ extract_split_apks_from_aab() {
     device_spec_rel="${device_spec_path#"${WORK_DIR}/"}"
     apks_rel="built-splits.apks"
     output_rel="${output_dir#"${WORK_DIR}/"}"
-    log_info "Running bundletool to extract split APKs from $(basename "${aab_path}")..."
+    # Google Play serves SDK 32+ devices a variant with sparse resource encoding even when the
+    # AAB's BundleConfig does not ask for it. bundletool makes the same variant only when the
+    # config says VARIANT_FOR_SDK_32, so set that on a COPY of the AAB (nothing else changes).
+    log_info "Setting BundleConfig sparseEncoding=VARIANT_FOR_SDK_32 on a copy of the AAB (Play's SDK 32+ variant)..."
+    write_java_tools
+    ${CONTAINER_CMD} run --rm ${CONTAINER_RUN_EXTRA} -v "${WORK_DIR}:/work${VOLUME_RW}" -w /work "${BUILD_IMAGE}" \
+        java -cp /usr/local/lib/bundletool.jar tools/SetSparse.java "${aab_rel}" built-sdk32.aab
+    aab_rel="built-sdk32.aab"
+    log_info "Running bundletool ${BUNDLETOOL_VERSION} to extract split APKs from ${aab_rel}..."
     ${CONTAINER_CMD} run --rm \
         ${CONTAINER_RUN_EXTRA} \
         -v "${WORK_DIR}:/work${VOLUME_RW}" \
@@ -267,26 +269,12 @@ extract_split_apks_from_aab() {
             unzip -qq -o '${apks_rel}' -d '${output_rel}' 2>&1 || true
             chmod -R a+rwX '${output_rel}' 2>/dev/null || true
         "
-    local splits_subdir="${output_dir}/splits"
-    if [[ -f "${splits_subdir}/base-master.apk" ]]; then
-        mv "${splits_subdir}/base-master.apk" "${splits_subdir}/base.apk"
-        log_info "Renamed base-master.apk -> base.apk"
-    fi
-    while IFS= read -r split_apk; do
-        [[ -f "${split_apk}" ]] || continue
-        local split_name suffix
-        split_name="$(basename "${split_apk}")"
-        [[ "${split_name}" == "base-master.apk" ]] && continue
-        suffix="${split_name#base-}"
-        mv "${split_apk}" "${splits_subdir}/split_config.${suffix}"
-        log_info "Renamed ${split_name} -> split_config.${suffix}"
-    done < <(find "${splits_subdir}" -maxdepth 1 -name "base-*.apk" 2>/dev/null || true)
-    local split_count
-    split_count="$(find "${output_dir}" -name "*.apk" 2>/dev/null | wc -l)"
-    log_info "Extracted ${split_count} split APK(s) to ${output_dir}"
-    log_info "Available splits:"
-    find "${output_dir}" -name "*.apk" 2>/dev/null | while IFS= read -r f; do
-        echo "  $(basename "${f}")"
+    local f n d="${output_dir}/splits"
+    for f in "${d}"/base-*.apk; do  # bundletool names -> Play names
+        [[ -f "${f}" ]] || continue
+        n="$(canonicalize_split_apk_name "$(basename "${f}")")"
+        mv "${f}" "${d}/${n}"
+        log_info "Built split: $(basename "${f}") -> ${n}"
     done
 }
 unzip_apk_in_container() {
@@ -298,6 +286,17 @@ unzip_apk_in_container() {
     container_exec "mkdir -p '${out_rel}' && \
         unzip -qq '${apk_rel}' -d '${out_rel}' 2>/dev/null || true && \
         chmod -R a+rwX '${out_rel}' 2>/dev/null || true"
+}
+# 0 when a diff line is only signing: official-only stamp-cert-sha256, or official-only root
+# META-INF/MANIFEST.MF, *.SF, *.RSA, *.DSA, *.EC. Anything else in META-INF counts.
+sig_line() {
+    local l="$1" o="$2" f re='^(MANIFEST\.MF|[^/]+\.(SF|RSA|DSA|EC))$'
+    [[ "${l}" == "Only in ${o}: stamp-cert-sha256" ]] && return 0
+    if [[ "${l}" == "Only in ${o}/META-INF: "* ]]; then
+        [[ "${l#"Only in ${o}/META-INF: "}" =~ ${re} ]]; return; fi
+    [[ "${l}" == "Only in ${o}: META-INF" ]] || return 1
+    while IFS= read -r f; do [[ "${f}" =~ ${re} ]] || return 1
+    done < <(cd "${WORK_DIR}/${o}/META-INF" && find . -mindepth 1 | sed 's|^\./||')
 }
 compare_apks() {
     local official_apk="$1"
@@ -322,14 +321,17 @@ compare_apks() {
     local non_meta_count=0
     if [[ -s "${diff_file}" ]]; then
         total_lines="$(wc -l < "${diff_file}")"
-        non_meta_count="$(grep -E '^Only in |^Files |^Binary files ' "${diff_file}" \
-            | grep -cvE \
-              '^Only in [^:]+: META-INF$|^Only in [^:]+/META-INF:|^Files [^:]+/META-INF/|^Binary files [^/]+/META-INF/|^Only in [^:]+: stamp-cert-sha256$|AndroidManifest\.xml|resources\.arsc' \
-            || true)"
-        non_meta_count="${non_meta_count:-0}"
+        local line
+        while IFS= read -r line; do
+            [[ "${line}" =~ ^(Only\ in|Files|Binary\ files|diff\ -r)\  ]] || continue
+            sig_line "${line}" "${official_rel}" && continue
+            # decoded and judged below (decode_and_diff_binaries)
+            [[ "${line}" =~ ^(Binary\ files|Files)\ ${official_rel}/(AndroidManifest\.xml|resources\.arsc)\ and ]] && continue
+            non_meta_count=$(( non_meta_count + 1 ))
+        done < "${diff_file}"
     fi
     TOTAL_DIFFS=$(( TOTAL_DIFFS + non_meta_count ))
-    log_info "  ${split_label}: ${non_meta_count} non-META-INF diff(s) (${total_lines} total diff lines)"
+    log_info "  ${split_label}: ${non_meta_count} non-signing diff(s) (${total_lines} total diff lines)"
     if [[ -s "${diff_file}" ]]; then
         log_info "  First 5 lines (full diff: ${diff_file}):"
         head -5 "${diff_file}" | while IFS= read -r line; do echo "    ${line}"; done
@@ -372,10 +374,13 @@ decode_and_diff_binaries() {
     local decode_cmds=""
     if [[ "${has_manifest}" -eq 1 ]]; then
         local mf_rel="${results_rel}/diff_manifest_${split_label}.txt"
+        local pa_rel="${results_rel}/play_additions_${split_label}.txt"
         decode_cmds+="
         aapt dump xmltree '${official_rel}' AndroidManifest.xml > /tmp/o_mf.txt 2>/dev/null || true
         aapt dump xmltree '${built_rel}' AndroidManifest.xml > /tmp/b_mf.txt 2>/dev/null || true
-        diff /tmp/o_mf.txt /tmp/b_mf.txt > '${mf_rel}' || true"
+        : > '${pa_rel}'
+        awk -v out='${pa_rel}' -f tools/play_meta.awk /tmp/o_mf.txt > /tmp/o_mf_f.txt
+        diff /tmp/o_mf_f.txt /tmp/b_mf.txt > '${mf_rel}' || true"
     fi
     if [[ "${has_resources}" -eq 1 ]]; then
         local rs_rel="${results_rel}/diff_resources_${split_label}.txt"
@@ -386,13 +391,28 @@ decode_and_diff_binaries() {
     fi
     container_exec "${decode_cmds}"
     chmod -R a+rwX "${results_dir}" 2>/dev/null || true
+    local pa_file="${results_dir}/play_additions_${split_label}.txt"
+    if [[ -s "${pa_file}" ]]; then
+        log_info "  Google Play manifest additions (official only), left out of the manifest diff:"
+        grep -o 'android:name([^)]*)="[^"]*"' "${pa_file}" | sed 's/.*="\(.*\)"/    \1/'
+    fi
     for _f in "${results_dir}/diff_manifest_${split_label}.txt" \
               "${results_dir}/diff_resources_${split_label}.txt"; do
         if [[ -f "${_f}" && ! -s "${_f}" ]]; then
-            echo "# Decoded output identical — binary diff is signing-related (no semantic change)" \
+            echo "# Decoded output identical apart from the Google Play additions listed in the log" \
                 > "${_f}" 2>/dev/null || true
         fi
     done
+    local rs_file="${results_dir}/diff_resources_${split_label}.txt"
+    if [[ "${has_resources}" -eq 1 ]] && grep -q "Decoded output identical" "${rs_file}" 2>/dev/null; then
+        local arsc_out
+        if arsc_out="$(container_exec "java tools/ArscCheck.java '${results_rel}/official_${split_label}/resources.arsc' '${results_rel}/built_${split_label}/resources.arsc'" 2>&1)"; then
+            log_info "  resources.arsc: ${arsc_out}"
+        else
+            log_warn "  resources.arsc: ${arsc_out}"
+            echo "# ${arsc_out}" > "${rs_file}"
+        fi
+    fi
     for decoded_diff in \
         "${results_dir}/diff_manifest_${split_label}.txt" \
         "${results_dir}/diff_resources_${split_label}.txt"; do
@@ -431,7 +451,9 @@ print_split_comparison_block() {
         local split_non_sig=false
         while IFS= read -r line; do
             local fname="" side="" tag=""
-            if [[ "${line}" =~ ^Binary\ files\ ${prefix_o}/(.+)\ and\ ${prefix_b}/.+\ differ$ ]]; then
+            if [[ "${line}" =~ ^diff\ -r\ ${prefix_o}/(.+)\ ${prefix_b}/ ]]; then
+                fname="${BASH_REMATCH[1]}"
+            elif [[ "${line}" =~ ^Binary\ files\ ${prefix_o}/(.+)\ and\ ${prefix_b}/.+\ differ$ ]]; then
                 fname="${BASH_REMATCH[1]}"
             elif [[ "${line}" =~ ^Files\ ${prefix_o}/(.+)\ and\ ${prefix_b}/.+\ differ$ ]]; then
                 fname="${BASH_REMATCH[1]}"
@@ -446,21 +468,19 @@ print_split_comparison_block() {
             else
                 continue
             fi
-            if [[ "${fname}" == META-INF || "${fname}" == META-INF/* ]]; then
-                tag=" [signing]"
-            elif [[ "${fname}" == "stamp-cert-sha256" ]]; then
+            if sig_line "${line}" "${prefix_o}"; then
                 tag=" [signing]"
             elif [[ "${fname}" == "AndroidManifest.xml" ]]; then
                 local dm="${results_dir}/diff_manifest_${split_label}.txt"
                 if [[ -f "${dm}" ]] && grep -q "Decoded output identical" "${dm}" 2>/dev/null; then
-                    tag=" [decoded: identical — signing only]"
+                    tag=" [decoded: identical apart from Google Play additions]"
                 else
                     tag=" [decoded: see diff_manifest_${split_label}.txt]"
                 fi
             elif [[ "${fname}" == "resources.arsc" ]]; then
                 local dr="${results_dir}/diff_resources_${split_label}.txt"
                 if [[ -f "${dr}" ]] && grep -q "Decoded output identical" "${dr}" 2>/dev/null; then
-                    tag=" [decoded: identical — signing only]"
+                    tag=" [decoded: identical; typesCount header only]"
                 else
                     tag=" [decoded: see diff_resources_${split_label}.txt]"
                 fi
@@ -512,6 +532,8 @@ print_results_block() {
     echo "verdict:        ${verdict}"
     echo "appHash:        ${app_hash:-unknown}"
     echo "commit:         ${commit:-unknown}"
+    echo "scriptVersion:  ${SCRIPT_VERSION}"
+    echo "scriptHash:     ${SCRIPT_HASH}"
     echo ""
     print_split_comparison_block
     echo ""
@@ -526,23 +548,13 @@ print_results_block() {
     if [[ "${should_cleanup}" != "true" ]]; then
         echo "Work directory: ${WORK_DIR}"
         echo "Diff files:     ${WORK_DIR}/comparison/"
-        echo ""
-        echo "For deeper analysis:"
-        echo "  diffoscope '${WORK_DIR}/official-split-apks/$(basename "${OFFICIAL_APK:-base.apk}")' \\"
-        echo "             '${WORK_DIR}/built-split-apks/splits/$(basename "${OFFICIAL_APK:-base.apk}")'"
-        echo "  meld '${WORK_DIR}/comparison'"
     fi
 }
 usage() {
     cat <<EOF
-Usage: ${SCRIPT_NAME} --binary <file|dir|.tar.gz|.zip> [--version V] [--arch A] [--github-token T] [--cleanup]
-  --binary   Split APK set (single APK, directory, .tar.gz, or .zip). Alias: --apk
-  --version  Bitkit version (e.g. 2.1.2). Auto-detected from base.apk if omitted.
-  --arch     Target ABI for device-spec.json (default: arm64-v8a).
-  --type     Accepted for ABS compatibility; unused.
-  --github-token  GitHub PAT with read:packages scope (or GITHUB_TOKEN env var).
-  --cleanup  Remove work directory after run.
-  Requires: podman or docker. Exit: 0=reproducible 1=not_reproducible/ftbfs 2=invalid
+Usage: ${SCRIPT_NAME} --binary <split APK|dir|.zip|.tar.gz> (alias --apk) [--version V]
+  [--arch arm64-v8a] [--type (unused)] [--github-token PAT, or GITHUB_TOKEN] [--cleanup]
+Exit: 0 reproducible, 1 not_reproducible/ftbfs/failure, 2 invalid input
 EOF
 }
 parse_arguments() {
@@ -583,12 +595,7 @@ parse_arguments() {
         github_token="${GITHUB_TOKEN}"
     fi
     if [[ -z "${APK_INPUT}" ]]; then
-        echo "[ERROR] --binary <file|dir> is required."
-        echo "        Single file: compare only that split APK."
-        echo "        Directory:   compare all *.apk files in that directory."
-        echo "        Example:"
-        echo "          ${SCRIPT_NAME} --binary /path/to/splits/"
-        echo "          ${SCRIPT_NAME} --binary /path/to/splits/base.apk"
+        echo "[ERROR] --binary <file|dir> is required (a split APK, or a directory of splits)."
         echo "Exit code: ${EXIT_INVALID}"
         exit "${EXIT_INVALID}"
     fi
@@ -621,28 +628,13 @@ parse_arguments() {
     ARCH="${ARCH:-arm64-v8a}"
     case "${ARCH}" in
         arm64-v8a|armeabi-v7a|x86_64) ;;
-        *)
-            log_warn "Unrecognized arch '${ARCH}'; defaulting to arm64-v8a"
-            ARCH="arm64-v8a"
-            ;;
+        *) echo "[ERROR] Unsupported --arch '${ARCH}'"; echo "Exit code: ${EXIT_INVALID}"; exit "${EXIT_INVALID}" ;;
     esac
     if [[ -z "${github_token}" ]]; then
-        cat > "${EXEC_DIR}/COMPARISON_RESULTS.yaml" <<EOF
-script_version: ${SCRIPT_VERSION}
-verdict: ftbfs
-notes: |
-  GitHub token not provided. Bitkit depends on three native library AARs
-  (com.synonym:bitkit-core-android, com.synonym:ldk-node-android,
-  com.synonym:vss-client-android) hosted exclusively on GitHub Packages
-  (maven.pkg.github.com). GitHub Packages requires authentication (a PAT
-  with read:packages scope) even for packages from public repositories.
-  Pass --github-token <PAT> or set the GITHUB_TOKEN environment variable.
-EOF
-        RESULT_DONE=true
-        echo "[ERROR] GitHub token required for com.synonym:* GitHub Packages dependencies."
-        echo "        Pass --github-token <PAT> or set GITHUB_TOKEN env var."
-        echo "Exit code: ${EXIT_FAILED}"
-        exit "${EXIT_FAILED}"
+        echo "[ERROR] GitHub token required: the com.synonym:* AARs are on GitHub Packages, which needs"
+        echo "        a PAT with read:packages even for public packages. Set GITHUB_TOKEN or --github-token."
+        echo "Exit code: ${EXIT_INVALID}"
+        exit "${EXIT_INVALID}"
     fi
     ARCH_SAFE="${ARCH//-/_}"
     VERSION_SAFE="${VERSION:-provided}"
@@ -657,9 +649,8 @@ ensure_build_image() {
         return 0
     fi
     log_info "Building ${BUILD_IMAGE} from inline Dockerfile..."
-    log_info "Installs: JDK 17 (Zulu), Android SDK (build-tools 36.0.0, android-36), bundletool ${BUNDLETOOL_VERSION}, apktool."
+    log_info "Installs: JDK 17 (Zulu), Android SDK (build-tools 36.0.0, android-36, NDK ${NDK_VERSION}), bundletool ${BUNDLETOOL_VERSION}, apktool."
     log_info "Estimated time: 10-20 minutes depending on network speed."
-    mkdir -p "${WORK_DIR}"
     local dockerfile_path="${WORK_DIR}/Dockerfile.build"
     cat > "${dockerfile_path}" <<'DOCKERFILE_END'
 FROM docker.io/library/ubuntu:22.04
@@ -700,9 +691,10 @@ RUN yes | "${ANDROID_HOME}/cmdline-tools/bin/sdkmanager" \
         "platform-tools" \
         "platforms;android-36" \
         "build-tools;35.0.0" \
-        "build-tools;36.0.0" && \
+        "build-tools;36.0.0" \
+        "ndk;28.1.13356709" && \
     chmod -R a+rwX "${ANDROID_HOME}"
-ARG BUNDLETOOL_VERSION=1.17.2
+ARG BUNDLETOOL_VERSION=1.18.3
 RUN curl -fL \
         "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar" \
         -o /usr/local/lib/bundletool.jar && \
@@ -730,7 +722,7 @@ resolve_git_tag() {
     local candidates=("v${version}" "${version}")
     log_info "Resolving git tag for version ${version}..."
     for candidate in "${candidates[@]}"; do
-        if git ls-remote --tags --exit-code "${REPO_URL}" \
+        if ${CONTAINER_CMD} run --rm "${BUILD_IMAGE}" git ls-remote --tags --exit-code "${REPO_URL}" \
                 "refs/tags/${candidate}" >/dev/null 2>&1; then
             log_info "Found tag: ${candidate}"
             GIT_TAG="${candidate}"
@@ -744,8 +736,6 @@ resolve_git_tag() {
 }
 prepare() {
     log_info "=== PREPARE PHASE ==="
-    rm -rf "${WORK_DIR}"
-    mkdir -p "${WORK_DIR}"
     mkdir -p "${WORK_DIR}/official-split-apks"
     mkdir -p "${WORK_DIR}/built-output"
     chmod 777 "${WORK_DIR}/built-output"
@@ -764,9 +754,8 @@ prepare() {
         apk_count="$(find "${archive_extract_dir}" -name "*.apk" 2>/dev/null | wc -l)"
         if [[ "${apk_count}" -eq 0 ]]; then
             log_fail "No APK files found inside archive: ${APK_INPUT}"
-            generate_error_yaml "ftbfs" "No APK files found inside the provided archive."
-            RESULT_DONE=true
-            exit "${EXIT_FAILED}"
+            echo "Exit code: ${EXIT_INVALID}"
+            exit "${EXIT_INVALID}"
         fi
         log_info "Archive extracted. ${apk_count} APK(s) found:"
         find "${archive_extract_dir}" -name "*.apk" | sort | while IFS= read -r f; do
@@ -822,25 +811,23 @@ prepare() {
         OFFICIAL_BASE_APK="${OFFICIAL_APK}"
         log_warn "No base.apk found; using ${canonical_name} for metadata."
     fi
+    local pkg abi
+    pkg="$(container_aapt_version "${OFFICIAL_BASE_APK}" "package: name" || true)"
+    abi="$(find "${WORK_DIR}/official-split-apks" -name 'split_config.*.apk' -printf '%f\n' \
+        | sed -n 's/^split_config\.\(arm64_v8a\|armeabi_v7a\|x86_64\|x86\)\.apk$/\1/p' | head -1)"
+    if [[ "${pkg}" != "${APP_ID}" || ( -n "${abi}" && "${abi}" != "${ARCH//-/_}" ) ]]; then
+        log_fail "Input is package '${pkg:-unknown}' ABI '${abi:-none}'; expected ${APP_ID} ${ARCH}"
+        echo "Exit code: ${EXIT_INVALID}"
+        exit "${EXIT_INVALID}"
+    fi
+    log_pass "Package ${pkg}, ABI split ${abi:-none} (--arch ${ARCH})"
     if [[ -z "${VERSION}" ]]; then
         log_info "Auto-detecting version from APK content..."
         VERSION="$(container_aapt_version "${OFFICIAL_BASE_APK}" "versionName" || true)"
         [[ "${VERSION}" == "null" ]] && VERSION=""
         if [[ -z "${VERSION}" ]]; then
-            local _fn _stripped _ver
-            _fn="$(basename "${APK_INPUT}")"
-            _stripped="${_fn#${APP_ID}_}"
-            if [[ "${_stripped}" != "${_fn}" ]]; then
-                _ver="$(printf '%s' "${_stripped}" | cut -d'_' -f1)"
-                [[ "${_ver}" =~ ^[0-9]+\.[0-9] ]] && VERSION="${_ver}"
-            fi
-            [[ -n "${VERSION}" ]] && log_info "Version detected from filename: ${VERSION}"
-        fi
-        if [[ -z "${VERSION}" ]]; then
             log_fail "Could not detect versionName from APK. Pass --version explicitly."
-            generate_error_yaml "ftbfs" \
-                "Could not auto-detect versionName from APK. Pass --version explicitly."
-            RESULT_DONE=true
+            echo "Exit code: ${EXIT_INVALID}"
             exit "${EXIT_INVALID}"
         fi
         log_info "Version detected: ${VERSION}"
@@ -849,8 +836,7 @@ prepare() {
         local new_work_dir
         new_work_dir="$(work_dir_path "${VERSION_SAFE}" "${ARCH_SAFE}")"
         if [[ "${new_work_dir}" != "${WORK_DIR}" ]]; then
-            rm -rf "${new_work_dir}"
-            mv "${WORK_DIR}" "${new_work_dir}"
+            mv -T "${WORK_DIR}" "${new_work_dir}"
             WORK_DIR="${new_work_dir}"
             OFFICIAL_APK="${WORK_DIR}/official-split-apks/${canonical_name}"
             if [[ -f "${WORK_DIR}/metadata-base.apk" ]]; then
@@ -876,19 +862,17 @@ build_image() {
     log_info "=== BUILD IMAGE PHASE ==="
     ensure_build_image
 }
+build_failed() {  # source failed to build: the only ftbfs this script writes
+    log_fail "$1"
+    generate_comparison_yaml "ftbfs" "$1"
+    RESULT_DONE=true
+    echo "Exit code: ${EXIT_FAILED}"
+    exit "${EXIT_FAILED}"
+}
 build() {
     log_info "=== BUILD PHASE ==="
     if ! resolve_git_tag "${VERSION_SAFE}"; then
-        echo ""
-        echo "======================================================"
-        echo "  SOURCE NOT FOUND FOR VERSION ${VERSION_SAFE}"
-        echo "  Tried tags: v${VERSION_SAFE}, ${VERSION_SAFE}"
-        echo "  Repository: ${REPO_URL}"
-        echo "======================================================"
-        echo ""
-        generate_comparison_yaml "ftbfs" \
-            "Tag not found for version ${VERSION_SAFE}. Tried: v${VERSION_SAFE}, ${VERSION_SAFE}. Source code for this version has not been tagged in the synonymdev/bitkit-android repository."
-        RESULT_DONE=true
+        log_fail "No tag for ${VERSION_SAFE} in ${REPO_URL} (or no network); no verdict written."
         echo "Exit code: ${EXIT_FAILED}"
         exit "${EXIT_FAILED}"
     fi
@@ -896,7 +880,7 @@ build() {
     log_info "Build: bundleMainnetRelease --no-build-cache --no-configuration-cache"
     log_info "Arch target: ${ARCH}"
     log_info "Cloning + building in container. First run may take 30-60 minutes."
-    log_info "NOTE: GitHub Packages downloads ~400 MB of native AARs on first run."
+    local rc=0
     ${CONTAINER_CMD} run --rm \
         ${CONTAINER_RUN_EXTRA} \
         -v "${WORK_DIR}/built-output:/workspace${VOLUME_RW}" \
@@ -906,6 +890,7 @@ build() {
         -e "ANDROID_SDK_ROOT=/opt/android-sdk" \
         -e "JAVA_HOME=/usr/lib/jvm/zulu17-ca-amd64" \
         -e "GITHUB_ACTOR=walletscrutiny" \
+        -e "NDK_VERSION=${NDK_VERSION}" \
         -e "GITHUB_TOKEN=${github_token}" \
         "${BUILD_IMAGE}" \
         bash -c "set -euo pipefail
@@ -928,34 +913,7 @@ build() {
             fi
             mkdir -p /workspace/app/app/src/mainnetRelease
             cat > /workspace/app/app/src/mainnetRelease/google-services.json <<'GSEOF'
-{
-  \"project_info\": {
-    \"project_number\": \"783092706332\",
-    \"project_id\": \"bitkit-prod\",
-    \"storage_bucket\": \"bitkit-prod.firebasestorage.app\"
-  },
-  \"client\": [
-    {
-      \"client_info\": {
-        \"mobilesdk_app_id\": \"1:783092706332:android:1bc9125e3a0db5d3b703d9\",
-        \"android_client_info\": {
-          \"package_name\": \"to.bitkit\"
-        }
-      },
-      \"api_key\": [
-        {
-          \"current_key\": \"AIzaSyDIdnCadyHRiBAwYaJHTcXh5gaK0kJbKLc\"
-        }
-      ],
-      \"services\": {
-        \"appinvite_service\": {
-          \"other_platform_oauth_client\": []
-        }
-      }
-    }
-  ],
-  \"configuration_version\": \"1\"
-}
+{\"project_info\": {\"project_number\": \"783092706332\",\"project_id\": \"bitkit-prod\",\"storage_bucket\": \"bitkit-prod.firebasestorage.app\"},\"client\": [{\"client_info\": {\"mobilesdk_app_id\": \"1:783092706332:android:1bc9125e3a0db5d3b703d9\",\"android_client_info\": {\"package_name\": \"to.bitkit\"}},\"api_key\": [{\"current_key\": \"AIzaSyDIdnCadyHRiBAwYaJHTcXh5gaK0kJbKLc\"}],\"services\": {\"appinvite_service\": {\"other_platform_oauth_client\": []}}}],\"configuration_version\": \"1\"}
 GSEOF
             echo '[INFO] google-services.json written for mainnetRelease flavor.'
             mkdir -p /workspace/.gradle
@@ -986,7 +944,15 @@ GSEOF
                 2>&1
             echo '[INFO] Build complete.'
             chmod -R a+rwX /workspace 2>/dev/null || true
-        "
+        " 2>&1 | tee "${WORK_DIR}/build.log" || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        if grep -qiE 'unable to access|Could not resolve host|Could not (GET|HEAD) |Connection (refused|reset|timed out)|Read timed out|Network is unreachable|name resolution|status code (401|403|429|5[0-9]{2})' "${WORK_DIR}/build.log"; then
+            log_fail "Clone/build stopped on a network or access error (exit ${rc}); no verdict written."
+            echo "Exit code: ${EXIT_FAILED}"
+            exit "${EXIT_FAILED}"
+        fi
+        build_failed "bundleMainnetRelease failed (exit ${rc}); log: build.log in the workspace."
+    fi
     chmod -R a+rwX "${WORK_DIR}/built-output" 2>/dev/null || true
     local aab_path
     aab_path="$(find "${WORK_DIR}/built-output" \
@@ -998,7 +964,7 @@ GSEOF
         log_fail "Built AAB not found after bundleMainnetRelease."
         log_info "All .aab files found under built-output:"
         find "${WORK_DIR}/built-output" -name "*.aab" 2>/dev/null | head -10 || true
-        exit "${EXIT_FAILED}"
+        build_failed "No AAB under outputs/bundle after bundleMainnetRelease."
     fi
     BUILT_AAB="${aab_path}"
     log_pass "Built AAB: ${BUILT_AAB}"
@@ -1018,16 +984,13 @@ extract_and_compare() {
         local split_name split_label built_split
         split_name="$(basename "${official_apk}")"
         split_label="${split_name%.apk}"
-        log_info "Looking for built match for: ${split_name}"
         if built_split="$(resolve_built_split_apk "${official_apk}" "${built_splits_dir}/splits")"; then
-            log_info "Official split: ${split_name}"
-            log_info "Built split:    $(basename "${built_split}")"
+            log_info "Official ${split_name} <-> built $(basename "${built_split}")"
             compare_apks "${official_apk}" "${built_split}" "${split_label}"
             compared=$(( compared + 1 ))
         else
             log_warn "No matching built split for: ${split_name} — skipping comparison"
-            log_info "  Canonical name tried: $(canonicalize_split_apk_name "${split_name}")"
-            log_info "  Available built splits:"
+            log_info "  Built splits:"
             find "${built_splits_dir}" -name "*.apk" 2>/dev/null \
                 | while IFS= read -r f; do echo "    $(basename "${f}")"; done
             TOTAL_DIFFS=$(( TOTAL_DIFFS + 1 ))
@@ -1038,7 +1001,7 @@ extract_and_compare() {
         exit "${EXIT_FAILED}"
     fi
     log_info "Total splits compared: ${compared}"
-    log_info "Total non-META-INF diffs (across all splits): ${TOTAL_DIFFS}"
+    log_info "Total non-signing diffs (across all splits): ${TOTAL_DIFFS}"
 }
 result() {
     log_info "=== RESULT PHASE ==="
@@ -1048,14 +1011,16 @@ result() {
         log_pass "VERDICT: REPRODUCIBLE"
     else
         verdict="not_reproducible"
-        log_warn "VERDICT: NOT REPRODUCIBLE (${TOTAL_DIFFS} non-META-INF difference(s))"
+        log_warn "VERDICT: NOT REPRODUCIBLE (${TOTAL_DIFFS} non-signing difference(s))"
     fi
     local notes
-    notes="bundleMainnetRelease, JDK 17 Zulu, AGP 8.13.2, bundletool ${BUNDLETOOL_VERSION}.
+    notes="bundleMainnetRelease, JDK 17 Zulu, AGP 9.3.0, NDK ${NDK_VERSION}, bundletool ${BUNDLETOOL_VERSION}.
   device-spec: arm64-v8a, screenDensity=480, sdkVersion=36.
   Rust AARs (bitkit-core, ldk-node, vss-client) from GitHub Packages at pinned versions.
   google-services.json injected from base.apk public values.
-  Expected diffs: META-INF (signing), stamp-cert-sha256 (Play Store)."
+  Splits made from a copy of the AAB with BundleConfig sparseEncoding=VARIANT_FOR_SDK_32 (Play's SDK 32+ variant).
+  Accepted: root META-INF signing files, stamp-cert-sha256, Play manifest meta-data (stamp.source, stamp.type,
+  vending.derived.apk.id), resources.arsc typeSpec typesCount equal to its type-chunk count."
     generate_comparison_yaml "${verdict}" "${notes}"
     print_results_block "${verdict}"
     RESULT_DONE=true
@@ -1074,10 +1039,12 @@ result() {
     fi
 }
 main() {
+    rm -f "${EXEC_DIR}/COMPARISON_RESULTS.yaml"  # never leave a stale verdict
     log_info "Starting ${SCRIPT_NAME} ${SCRIPT_VERSION}"
     log_warn "This script is provided as-is. Review before running. Use at your own risk."
     detect_container_runtime
     parse_arguments "$@"
+    mkdir "${WORK_DIR}"  # exclusive: unique per run (RUN_ID); never reused or deleted
     build_image
     prepare
     build
