@@ -1,8 +1,8 @@
 #!/bin/bash
-# bitkey_build.sh v0.2.32 — Bitkey Android Play Store split APK verification
+# bitkey_build.sh v0.2.33 — Bitkey Android Play Store split APK verification
 # Organization: WalletScrutiny.com
 
-readonly SCRIPT_VERSION="v0.2.32"
+readonly SCRIPT_VERSION="v0.2.33"
 SCRIPT_HASH="$(sha256sum "$(readlink -f "${BASH_SOURCE[0]}")" | awk '{print $1}')"
 echo "$(basename "${BASH_SOURCE[0]}") ${SCRIPT_VERSION} sha256:${SCRIPT_HASH}"
 
@@ -305,7 +305,7 @@ assert_package_name() {
 }
 
 detect_container_runtime() {
-    if command -v docker >/dev/null 2>&1; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         CONTAINER_CMD="docker"
         VOLUME_RO=":ro"
         VOLUME_RW=""

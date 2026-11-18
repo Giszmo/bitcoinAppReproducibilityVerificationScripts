@@ -2,7 +2,7 @@
 # ==============================================================================
 # liana_build.sh - Liana Desktop Wallet Reproducible Build Verification
 # ==============================================================================
-# Version:       v0.1.13
+# Version:       v0.1.14
 # Organization:  WalletScrutiny.com
 # Project:       https://github.com/wizardsardine/liana
 # ==============================================================================
@@ -29,7 +29,7 @@ set -euo pipefail
 # ==============================================================================
 # Metadata
 # ==============================================================================
-SCRIPT_VERSION="v0.1.13"
+SCRIPT_VERSION="v0.1.14"
 SCRIPT_NAME="liana_build.sh"
 APP_NAME="Liana"
 APP_ID="liana"
@@ -195,7 +195,7 @@ check_dependencies() {
         generate_error_yaml "ftbfs" "Script was run as root. Run as a normal user."
         exit 1
     fi
-    if command -v docker &>/dev/null; then
+    if command -v docker &>/dev/null && docker info &>/dev/null; then
         container_cmd="docker"
     elif command -v podman &>/dev/null; then
         container_cmd="podman"

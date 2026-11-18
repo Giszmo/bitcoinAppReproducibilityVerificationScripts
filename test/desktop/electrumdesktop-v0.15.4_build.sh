@@ -2,7 +2,7 @@
 # ==============================================================================
 # electrumdesktop_build.sh - Electrum Desktop Reproducible Build Verification
 # ==============================================================================
-# Version:          v0.15.3
+# Version:          v0.15.4
 # Organization:     WalletScrutiny.com
 # Last modified by: Claude Opus 5.5 (WalletScrutiny session)
 # Last modified on: 2026-10-26
@@ -28,7 +28,7 @@ INFO_ICON="[INFO]"
 
 APP_NAME="Electrum Desktop"
 APP_ID="electrum"
-SCRIPT_VERSION="v0.15.3"
+SCRIPT_VERSION="v0.15.4"
 
 # ---------- Logging Functions ----------
 log_info() { echo -e "${BLUE}${INFO_ICON}${NC} $*"; }
@@ -284,7 +284,7 @@ fi
 # Priority: 1) CONTAINER_CMD env var, 2) docker, 3) podman
 if [[ -n "${CONTAINER_CMD:-}" ]]; then
   container_cmd="$CONTAINER_CMD"
-elif command -v docker >/dev/null 2>&1; then
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   container_cmd="docker"
 elif command -v podman >/dev/null 2>&1; then
   container_cmd="podman"

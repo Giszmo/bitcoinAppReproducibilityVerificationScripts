@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # unstoppablewallet_build.sh - Unstoppable Wallet Reproducible Build Verification
-# Version:       v0.6.6
+# Version:       v0.6.7
 # Organization:  WalletScrutiny.com
 # License:       MIT
 # Last modified by: Claude (WalletScrutiny agent)
@@ -16,7 +16,7 @@
 #                Lone Play base.apk, config split, non-upstream signer (F-Droid store build): exit 2.
 #                zano-kit built, ~290 MB prebuilt .a trusted; thorchain/xrp/near kits built locally.
 
-SCRIPT_VERSION="v0.6.6"
+SCRIPT_VERSION="v0.6.7"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
 if [[ -f "$SCRIPT_PATH" ]]; then
@@ -143,7 +143,7 @@ else
 fi
 
 if [[ -z "${CRUN:-}" ]]; then
-    if command -v docker &>/dev/null; then
+    if command -v docker &>/dev/null && docker info &>/dev/null; then
         CRUN=docker
     elif command -v podman &>/dev/null; then
         CRUN=podman

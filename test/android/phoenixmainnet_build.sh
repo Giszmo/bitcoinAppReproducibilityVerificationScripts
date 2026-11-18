@@ -2,7 +2,7 @@
 # ==============================================================================
 # phoenixmainnet_build.sh - Phoenix Wallet Reproducible Build Verification
 # ==============================================================================
-# Version:       v0.2.10
+# Version:       v0.2.11
 # Organization:  WalletScrutiny.com
 # Last Modified: 2026-07-29
 # Project:       https://github.com/ACINQ/phoenix
@@ -35,7 +35,7 @@ set -euo pipefail
 # ------------------------------------------------------------------------------
 # Constants
 # ------------------------------------------------------------------------------
-SCRIPT_VERSION="v0.2.10"
+SCRIPT_VERSION="v0.2.11"
 APP_ID="fr.acinq.phoenix.mainnet"
 REPO_URL="https://github.com/ACINQ/phoenix.git"
 
@@ -179,7 +179,7 @@ trap 'on_error $LINENO' ERR
 # Container runtime detection
 # ------------------------------------------------------------------------------
 CONTAINER_CMD=""
-if command -v docker >/dev/null 2>&1; then
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   CONTAINER_CMD="docker"
 elif command -v podman >/dev/null 2>&1; then
   CONTAINER_CMD="podman"
