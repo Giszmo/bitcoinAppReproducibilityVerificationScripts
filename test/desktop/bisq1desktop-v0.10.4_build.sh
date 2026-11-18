@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# bisq1desktop-v0.10.3_build.sh - Bisq 1 Desktop Reproducible Build Verification
+# bisq1desktop-v0.10.4_build.sh - Bisq 1 Desktop Reproducible Build Verification
 # ==============================================================================
-# Version:       v0.10.3
+# Version:       v0.10.4
 # Organization:  WalletScrutiny.com
 # Last Modified: 2026-10-29
 # Project:       https://github.com/bisq-network/bisq
@@ -31,8 +31,8 @@ set -euo pipefail
 # Ubuntu host with umask 002 gives 0664 and 5 jars differ for that reason alone (found at 1.10.7). Pin it.
 umask 022
 
-SCRIPT_VERSION="v0.10.3"
-SCRIPT_NAME="bisq1desktop-v0.10.3_build.sh"
+SCRIPT_VERSION="v0.10.4"
+SCRIPT_NAME="bisq1desktop-v0.10.4_build.sh"
 APP_NAME="Bisq 1"
 APP_ID="bisq"
 REPO_URL="https://github.com/bisq-network/bisq"
@@ -65,18 +65,25 @@ log_error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 die() { local m="$1"; local c="${2:-$EXIT_BUILD_FAILED}"; log_error "$m"; exit "$c"; }
 YAML_OUT=""   # set by each path before use
 ftbfs_die() { write_yaml "$YAML_OUT" ftbfs "$1"; die "$1"; }   # source failed to build: ftbfs YAML + exit 1
+# Container engine: docker when its daemon answers, else podman (abs-runner has docker installed but off-limits).
+CTR=""
+pick_ctr() {
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then CTR=docker
+    elif command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then CTR=podman
+    else return 1; fi
+}
 
 VERIFY_SCRIPT=""
 cleanup_on_exit() {
     if [[ "$KEEP_CONTAINER" != "true" ]]; then
         for c in "$CONTAINER_A" "$CONTAINER_B" "$CONTAINER_CMP"; do
-            [[ -n "$c" ]] && docker rm -f "$c" >/dev/null 2>&1 || true
+            [[ -n "$c" ]] && "${CTR:-docker}" rm -f "$c" >/dev/null 2>&1 || true
         done
     fi
     [[ -n "${VERIFY_SCRIPT:-}" ]] && rm -f "$VERIFY_SCRIPT" 2>/dev/null || true
     [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]] || return 0
     # Hand the workspace back; move the verdict out (ABS searches recursively: one YAML only).
-    [[ -n "${DOCKER_RUN_EXTRA:-}" ]] && docker unshare chown -R 0:0 "$WORK_DIR" >/dev/null 2>&1
+    [[ -n "${DOCKER_RUN_EXTRA:-}" ]] && "${CTR:-docker}" unshare chown -R 0:0 "$WORK_DIR" >/dev/null 2>&1
     chmod -R u+rwX "$WORK_DIR" 2>/dev/null || true
     [[ -f "$WORK_DIR/COMPARISON_RESULTS.yaml" ]] && mv -f "$WORK_DIR/COMPARISON_RESULTS.yaml" "$CALLER_DIR/"
     return 0
@@ -149,7 +156,7 @@ GH_MOUNT_DIR=""
 
 build_gh_helper() {
     log_info "Building gh helper container (debian:bookworm-slim + gh CLI + p7zip)..."
-    docker build -t "$GH_HELPER_IMAGE" - <<'GHEOF'
+    "$CTR" build -t "$GH_HELPER_IMAGE" - <<'GHEOF'
 FROM debian:bookworm-slim
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends curl ca-certificates gnupg jq unzip p7zip-full diffutils \
@@ -167,7 +174,7 @@ GHEOF
 # gh in the helper container: token passed by NAME (-e GITHUB_TOKEN, never in argv or logs); host uid:gid so
 # downloads are user-owned; HOME=/work gives gh a writable config dir.
 gh_c() {
-    docker run --rm -e GITHUB_TOKEN -e HOME=/work \
+    "$CTR" run --rm -e GITHUB_TOKEN -e HOME=/work \
         --user "$(id -u):$(id -g)" \
         -v "${GH_MOUNT_DIR}:/work" -w /work "$GH_HELPER_IMAGE" gh "$@"
 }
@@ -179,12 +186,11 @@ acquire_built_exes_via_ci() {
     # Missing token / docker = infrastructure unavailable -> ftbfs + exit 1 (EXIT_BUILD_FAILED), same
     # class as the deb/rpm 'docker not found' path (exit 2 is reserved for invalid CLI parameters).
     [[ -n "$GITHUB_TOKEN" ]] || die "GITHUB_TOKEN/GH_TOKEN required to dispatch CI + read artifacts; or pass --built <dir>."
-    command -v docker >/dev/null 2>&1 || die "docker required for the gh helper container."
-    docker info >/dev/null 2>&1 || die "docker daemon not running."
+    pick_ctr || die "a working docker or podman is required for the gh helper container."
     GH_MOUNT_DIR="$artdir"; mkdir -p "$artdir"
     # gh helper image is a shared cached tooling image (debian base + apt pkgs unpinned; same shared
     # rationale as the release-builder image — rebuilt only when absent).
-    if ! docker image inspect "$GH_HELPER_IMAGE" >/dev/null 2>&1; then
+    if ! "$CTR" image inspect "$GH_HELPER_IMAGE" >/dev/null 2>&1; then
         build_gh_helper || die "gh helper image build failed (see output)."
     fi
 
@@ -239,17 +245,17 @@ diag_extract_diff() {
     rm -f "$outfile"
     # docker -v mount sources MUST be absolute (find can return relative paths under --built).
     f1="$(realpath "$f1")"; f2="$(realpath "$f2")"
-    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-        echo "DIAGNOSTIC UNAVAILABLE: docker not available; $(basename "$outfile") skipped." >> "$detail"
+    if ! pick_ctr; then
+        echo "DIAGNOSTIC UNAVAILABLE: no working docker or podman; $(basename "$outfile") skipped." >> "$detail"
         return 0
     fi
-    docker image inspect "$GH_HELPER_IMAGE" >/dev/null 2>&1 || build_gh_helper \
+    "$CTR" image inspect "$GH_HELPER_IMAGE" >/dev/null 2>&1 || build_gh_helper \
         || { echo "DIAGNOSTIC UNAVAILABLE: helper image unavailable; $(basename "$outfile") skipped." >> "$detail"; return 0; }
 
     # Extract both files + diff inside the container; write full diff + a meta line to the mounted work dir.
     local wd; wd="$(mktemp -d "${PWD}/diag.XXXXXX")"
     local rc=0
-    docker run --rm --user "$(id -u):$(id -g)" \
+    "$CTR" run --rm --user "$(id -u):$(id -g)" \
         -v "$f1":/in/f1:ro -v "$f2":/in/f2:ro -v "$wd":/work -w /work \
         "$GH_HELPER_IMAGE" bash -c '
             set +e
@@ -498,13 +504,12 @@ log_info "Work Dir: $WORK_DIR"
 log_info ""
 
 # ---- Docker preflight ----
-command -v docker >/dev/null 2>&1 || die "Docker not found on host."
-docker info >/dev/null 2>&1 || die "Docker daemon not running."
-log_success "Docker OK"
+pick_ctr || die "Neither a working docker nor podman found on host."
+log_success "Container engine OK: $CTR"
 # Rootless podman behind a `docker` shim needs --userns=keep-id for --user $(id -u) to keep write access to
 # the bind mounts (real docker needs nothing). Detected, never assumed.
 DOCKER_RUN_EXTRA=""
-if docker --version 2>/dev/null | grep -qi podman; then
+if [[ "$CTR" == podman ]] || docker --version 2>/dev/null | grep -qi podman; then
     DOCKER_RUN_EXTRA="--userns=keep-id"
     log_info "Container engine is podman: adding ${DOCKER_RUN_EXTRA} to docker run"
 fi
@@ -592,7 +597,7 @@ fi
 
 build_legacy_image() {  # cached tooling image for pre-1.10 tags
     log_info "Building legacy pre-1.10 image (Ubuntu 22.04 + Zulu 11/17)..."
-    docker build $CACHE_FLAG -t "$IMAGE_NAME" - <<'LEGACYEOF'
+    "$CTR" build $CACHE_FLAG -t "$IMAGE_NAME" - <<'LEGACYEOF'
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -y --no-install-recommends \
@@ -612,12 +617,12 @@ LEGACYEOF
 # ---- Build image: upstream's own Dockerfile (>=1.10) or the cached legacy image (pre-1.10) ----
 CACHE_FLAG=""; [[ "$NO_CACHE" == "true" ]] && CACHE_FLAG="--no-cache"
 if [[ "$LEGACY_TOOLCHAIN" == "true" ]]; then
-    if [[ "$NO_CACHE" == "true" ]] || ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    if [[ "$NO_CACHE" == "true" ]] || ! "$CTR" image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
         build_legacy_image || die "legacy image build failed."
     fi
 else
     log_info "Building release-builder image from upstream Dockerfile..."
-    if ! docker build $CACHE_FLAG --pull=false --platform linux/amd64 \
+    if ! "$CTR" build $CACHE_FLAG --pull=false --platform linux/amd64 \
             -t "$IMAGE_NAME" "$UPSTREAM_DOCKERDIR" 2>&1 | tee "${execution_dir}/build-image.log"; then
         ftbfs_die "release-builder image build failed (see build-image.log)."
     fi
@@ -632,7 +637,7 @@ gradle_build() {  # srcdir containername logfile label
         # Pre-1.10: two-phase build, JDK 11 compile then JDK 17 jpackage (no single-JDK recipe existed).
         log_info "[$label] building legacy (JDK11 build + JDK17 jpackage; 20-40 min)..."
         set +e
-        docker run $rmflag $DOCKER_RUN_EXTRA --platform linux/amd64 --user "$(id -u):$(id -g)" \
+        "$CTR" run $rmflag $DOCKER_RUN_EXTRA --platform linux/amd64 --user "$(id -u):$(id -g)" \
             -v "${src}":/workspace -w /workspace --name "$cname" "$IMAGE_NAME" bash -c '
                 export JAVA_HOME=/usr/lib/jvm/zulu11 PATH="$JAVA_HOME/bin:$PATH"
                 ./gradlew --no-daemon clean build -x test || exit $?
@@ -651,7 +656,7 @@ gradle_build() {  # srcdir containername logfile label
     fi
     log_info "[$label] building (./gradlew ${tasks[*]}; 8-15 min)..."
     set +e
-    docker run $rmflag $DOCKER_RUN_EXTRA --platform linux/amd64 --user "$(id -u):$(id -g)" \
+    "$CTR" run $rmflag $DOCKER_RUN_EXTRA --platform linux/amd64 --user "$(id -u):$(id -g)" \
         -v "${src}":/workspace -w /workspace \
         --name "$cname" \
         "$IMAGE_NAME" \
@@ -866,7 +871,7 @@ chmod +x "$VERIFY_SCRIPT"
 log_info "Comparing (A vs B determinism, A vs official + dpkg-deb -R evidence)..."
 RM_FLAG="--rm"; [[ "$KEEP_CONTAINER" == "true" ]] && RM_FLAG=""
 set +e
-docker run $RM_FLAG $DOCKER_RUN_EXTRA --platform linux/amd64 --user "$(id -u):$(id -g)" \
+"$CTR" run $RM_FLAG $DOCKER_RUN_EXTRA --platform linux/amd64 --user "$(id -u):$(id -g)" \
     -e BISQ_VERSION="$BISQ_VERSION" -e BISQ_TYPE="$BISQ_TYPE" \
     -e SCRIPT_VERSION="$SCRIPT_VERSION" -e OFFICIAL_PKG_NAME="$OFFICIAL_PKG_NAME" \
     -e LEGACY_TOOLCHAIN="$LEGACY_TOOLCHAIN" -e RECIPE_JDK_PIN="$RECIPE_JDK_PIN" \
