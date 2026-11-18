@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ======================================================================================
-# bitcoinsafe-v0.9.5_build.sh - Bitcoin Safe Desktop Reproducible Build Verification
+# bitcoinsafe-v0.9.6_build.sh - Bitcoin Safe Desktop Reproducible Build Verification
 # ======================================================================================
-# Version:       v0.9.5
+# Version:       v0.9.6
 # Organization:  WalletScrutiny.com
 # Last modified by: Claude Code for Danny
-# Last modified on: 2026-11-12
+# Last modified on: 2026-11-18
 # Project:       https://github.com/andreasgriffin/bitcoin-safe
 # LICENSE: MIT License
 #
@@ -30,7 +30,7 @@ set -euo pipefail
 # ======================================================================================
 
 APP_ID="bitcoin.safe"
-SCRIPT_VERSION="v0.9.5"
+SCRIPT_VERSION="v0.9.6"
 REPO_URL="https://github.com/andreasgriffin/bitcoin-safe.git"
 RELEASE_BASE="https://github.com/andreasgriffin/bitcoin-safe/releases/download"
 
@@ -159,12 +159,15 @@ fetch_release_file() {
 # build.py can spawn sibling containers for compilation.
 
 detect_build_socket() {
-  if [[ -S "/var/run/docker.sock" ]]; then
+  # The socket must belong to the runtime in use: a docker.sock left by an
+  # unusable Docker (abs-runner) is not a Podman socket.
+  if [[ "$1" == docker ]]; then
+    [[ -S "/var/run/docker.sock" ]] || return 1
     echo "/var/run/docker.sock"
     return 0
   fi
 
-  if command_exists podman; then
+  if [[ "$1" == podman ]]; then
     local podman_socket=""
     podman_socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
     if [[ -S "$podman_socket" ]]; then
@@ -185,7 +188,8 @@ detect_build_socket() {
 bootstrap_container() {
   local CONTAINER_CMD=""
   local BUILD_SOCKET=""
-  if command_exists docker; then
+  local PODMAN_SVC_PID=""
+  if command_exists docker && docker info >/dev/null 2>&1; then
     CONTAINER_CMD="docker"
   elif command_exists podman; then
     CONTAINER_CMD="podman"
@@ -196,7 +200,19 @@ bootstrap_container() {
     exit 1
   fi
 
-  if ! BUILD_SOCKET="$(detect_build_socket)"; then
+  if ! BUILD_SOCKET="$(detect_build_socket "$CONTAINER_CMD")" && [[ "$CONTAINER_CMD" == podman ]]; then
+    # No podman.socket service: run an API service for this run only.
+    BUILD_SOCKET="$(mktemp -d)/podman.sock"
+    podman system service --time=0 "unix://$BUILD_SOCKET" >/dev/null 2>"${BUILD_SOCKET%.sock}.log" &
+    PODMAN_SVC_PID=$!
+    for _ in $(seq 50); do [[ -S "$BUILD_SOCKET" ]] && break; sleep 0.2; done
+    if [[ -S "$BUILD_SOCKET" ]]; then
+      log_info "Started a Podman API service for this run: $BUILD_SOCKET"
+    else
+      log_error "podman system service failed: $(tail -3 "${BUILD_SOCKET%.sock}.log")"
+    fi
+  fi
+  if [[ ! -S "$BUILD_SOCKET" ]]; then
     log_error "No Docker-compatible build socket found."
     log_error "For Docker, ensure /var/run/docker.sock exists."
     log_error "For Podman, ensure podman.socket is running."
@@ -215,7 +231,8 @@ bootstrap_container() {
   else
     rl="$(docker info --format '{{.SecurityOptions}}' 2>/dev/null || true)"
   fi
-  [[ "$rl" == *rootless=true* || "$rl" == *name=rootless* ]] && OWNER="0:0"
+  local ROOTLESS=""
+  [[ "$rl" == *rootless=true* || "$rl" == *name=rootless* ]] && { OWNER="0:0"; ROOTLESS=1; }
 
   local SCRIPT_PATH
   SCRIPT_PATH="$(readlink -f "$0")"
@@ -254,7 +271,12 @@ bootstrap_container() {
     -e "HOST_UID=$HOST_UID"
     -e "HOST_GID=$HOST_GID"
     -e "DOCKER_SOCK_GID=$DOCKER_SOCK_GID"
+    -e "BS_ROOTLESS=$ROOTLESS"
   )
+
+  # Against a Podman socket, buildx boots a BuildKit container that rootless
+  # Podman cannot create (cgroup permission denied); use the classic builder.
+  [[ "$CONTAINER_CMD" != podman ]] || run_args+=( -e "DOCKER_BUILDKIT=0" )
 
   # If --binary was provided, mount the file into the container at the same path
   if [[ -n "$BINARY_FILE" ]]; then
@@ -312,6 +334,11 @@ bootstrap_container() {
       groupadd -g "$DOCKER_SOCK_GID" dockerhost 2>/dev/null || true
       useradd -m -u "$HOST_UID" -g "$HOST_GID" builder 2>/dev/null || true
       usermod -aG dockerhost builder 2>/dev/null || true
+      # Rootless: the socket shows as root-only in here, so builder cannot reach it.
+      # Container root is the host user, so it may open it to the host group.
+      if [[ -n "$BS_ROOTLESS" ]]; then
+        chgrp "$HOST_GID" /var/run/docker.sock && chmod 660 /var/run/docker.sock
+      fi
       chown "$HOST_UID:$HOST_GID" "$W"
 
       # Re-invoke script as builder user (pass --binary if provided)
@@ -321,9 +348,13 @@ bootstrap_container() {
   local cpid=$! rc=0
   # Background + wait so INT/TERM reach this trap; docker stop gives the
   # container time to run its cleanup.
-  trap "$CONTAINER_CMD stop -t 300 $CNAME >/dev/null 2>&1; wait $cpid || true; log_info 'Workspace kept: $WORKDIR'; exit 130" INT TERM
+  trap "$CONTAINER_CMD stop -t 300 $CNAME >/dev/null 2>&1; wait $cpid || true; [[ -z '$PODMAN_SVC_PID' ]] || kill $PODMAN_SVC_PID 2>/dev/null; log_info 'Workspace kept: $WORKDIR'; exit 130" INT TERM
   wait "$cpid" || rc=$?
   trap - INT TERM
+  if [[ -n "$PODMAN_SVC_PID" ]]; then
+    kill "$PODMAN_SVC_PID" 2>/dev/null || true
+    rm -rf "$(dirname "$BUILD_SOCKET")"
+  fi
   log_info "Workspace kept: $WORKDIR"
   exit "$rc"
 }
@@ -583,7 +614,7 @@ run_build() {
     export SOURCE_DATE_EPOCH
     export PYTHONHASHSEED=22
     export PYTHONIOENCODING="utf-8"
-    export DOCKER_BUILDKIT=1
+    export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"   # 0 under Podman, set by bootstrap_container
 
     # Install Poetry (python:3.12-slim base provides pip3)
     # Poetry version from upstream's own poetry.lock (dev dependency) at this tag
