@@ -1,5 +1,5 @@
 #!/bin/bash
-# onekey_build.sh v2.0.1 - Standardized verification script for OneKey Hardware Wallets
+# onekey_build.sh v2.0.2 - Standardized verification script for OneKey Hardware Wallets
 # Follows WalletScrutiny reproducible verification standards
 # Usage: onekey_build.sh --version VERSION --type TYPE --hash HASH --date DATE
 
@@ -19,7 +19,7 @@ sleep 2
 echo
 
 # Global Variables
-SCRIPT_VERSION="v2.0.1"
+SCRIPT_VERSION="v2.0.2"
 BUILD_TYPE="firmware"
 workDir="$(pwd)/onekey-work"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
@@ -27,7 +27,7 @@ repo="https://github.com/OneKeyHQ/firmware.git"
 IMAGE_NAME="onekey_firmware_verifier"
 
 # Detect container runtime
-if command -v docker &> /dev/null; then
+if command -v docker &> /dev/null && docker info &> /dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &> /dev/null; then

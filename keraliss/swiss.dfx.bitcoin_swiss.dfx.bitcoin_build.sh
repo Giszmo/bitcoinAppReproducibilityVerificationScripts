@@ -1,5 +1,5 @@
 #!/bin/bash
-# swiss.dfx.bitcoin_build.sh v1.8.0 - WalletScrutiny verification script for DFX Bitcoin Wallet
+# swiss.dfx.bitcoin_build.sh v1.8.1 - WalletScrutiny verification script for DFX Bitcoin Wallet
 # Follows WalletScrutiny reproducible verification standards
 # Usage: swiss.dfx.bitcoin_build.sh --version VERSION [--apk PATH] [--arch ARCH]
 
@@ -19,7 +19,7 @@ sleep 2
 echo
 
 # ─── Global Variables ─────────────────────────────────────────────────────────
-SCRIPT_VERSION="v1.8.0"
+SCRIPT_VERSION="v1.8.1"
 APP_ID="swiss.dfx.bitcoin"
 BUILD_TYPE="apk"
 REPO="https://github.com/DFXswiss/btc-wallet"
@@ -27,7 +27,7 @@ RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 wsContainer="docker.io/walletscrutiny/android:5"
 
 # Detect container runtime
-if command -v docker &> /dev/null; then
+if command -v docker &> /dev/null && docker info &> /dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &> /dev/null; then

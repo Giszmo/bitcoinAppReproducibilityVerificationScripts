@@ -1,5 +1,5 @@
 #!/bin/bash
-# specter-diy_build.sh v1.0.0 - WalletScrutiny verification script for Specter-DIY
+# specter-diy_build.sh v1.0.1 - WalletScrutiny verification script for Specter-DIY
 # Usage: specter-diy_build.sh --version VERSION [--binary PATH]
 
 set -e
@@ -16,7 +16,7 @@ echo -e "\033[0m"
 sleep 2
 echo
 
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 
 GREEN='\033[1;32m'
@@ -24,7 +24,7 @@ YELLOW='\033[1;33m'
 RED='\033[1;31m'
 NC='\033[0m'
 
-if command -v docker &>/dev/null; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &>/dev/null; then

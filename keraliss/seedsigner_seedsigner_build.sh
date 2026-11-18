@@ -1,5 +1,5 @@
 #!/bin/bash
-# seedsigner_build.sh v1.0.0 - WalletScrutiny verification script for SeedSigner
+# seedsigner_build.sh v1.0.1 - WalletScrutiny verification script for SeedSigner
 # Usage: seedsigner_build.sh --version VERSION --arch ARCH [--binary PATH]
 
 set -e
@@ -16,7 +16,7 @@ echo -e "\033[0m"
 sleep 2
 echo
 
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 
 GREEN='\033[1;32m'
@@ -24,7 +24,7 @@ YELLOW='\033[1;33m'
 RED='\033[1;31m'
 NC='\033[0m'
 
-if command -v docker &>/dev/null; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &>/dev/null; then
@@ -174,7 +174,7 @@ echo "Building SeedSigner OS image for ${ARCH} (this will take a long time)..."
 # even on ARM hosts (Apple M1/M2, etc.)
 if ! DOCKER_DEFAULT_PLATFORM=linux/amd64 \
      SS_ARGS="--${ARCH} --app-branch=${VERSION}" \
-     docker compose up --force-recreate --build; then
+     "$CONTAINER_CMD" compose up --force-recreate --build; then
     echo -e "${RED}Error: Firmware build failed${NC}"
     write_results "ftbfs" "SeedSigner v${VERSION} (${ARCH}): docker compose build failed."
     exit 1
@@ -224,7 +224,7 @@ fi
 
 echo
 echo "Cleaning up Docker resources..."
-docker compose -f "$WORK_DIR/seedsigner-os/docker-compose.yml" down 2>/dev/null || true
+"$CONTAINER_CMD" compose -f "$WORK_DIR/seedsigner-os/docker-compose.yml" down 2>/dev/null || true
 $CONTAINER_CMD image prune -f 2>/dev/null || true
 
 echo

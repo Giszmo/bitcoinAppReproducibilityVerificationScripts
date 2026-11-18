@@ -1,5 +1,5 @@
 #!/bin/bash
-# krux_m5stickv_build.sh v1.0.0 - WalletScrutiny verification script for Krux on M5StickV
+# krux_m5stickv_build.sh v1.0.1 - WalletScrutiny verification script for Krux on M5StickV
 # Usage: krux_m5stickv_build.sh --version VERSION [--binary ZIP] [--arch ARCH] [--type TYPE]
 
 set -e
@@ -16,7 +16,7 @@ echo -e "\033[0m"
 sleep 2
 echo
 
-SCRIPT_VERSION="v1.0.0"
+SCRIPT_VERSION="v1.0.1"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 REPO="https://github.com/selfcustody/krux.git"
 DEVICE="maixpy_m5stickv"
@@ -25,7 +25,7 @@ GREEN='\033[1;32m'
 RED='\033[1;31m'
 NC='\033[0m'
 
-if command -v docker &>/dev/null; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
   CONTAINER_CMD="docker"
   echo "Using Docker for containerization"
 elif command -v podman &>/dev/null; then

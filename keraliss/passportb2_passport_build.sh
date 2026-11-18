@@ -1,5 +1,5 @@
 #!/bin/bash
-# passport_build.sh v3.0.0 - Standardized verification script for Passport Hardware Wallet
+# passport_build.sh v3.0.1 - Standardized verification script for Passport Hardware Wallet
 # Follows WalletScrutiny reproducible verification standards
 # Usage: passport_build.sh --version VERSION --type TYPE
 #        passport_build.sh --version VERSION --type TYPE --binary PATH
@@ -20,7 +20,7 @@ sleep 2
 echo
 
 # Global Variables
-SCRIPT_VERSION="v3.0.0"
+SCRIPT_VERSION="v3.0.1"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 
 # Color constants (defined before first use)
@@ -30,7 +30,7 @@ RED='\033[1;31m'
 NC='\033[0m'
 
 # Detect container runtime
-if command -v docker &> /dev/null; then
+if command -v docker &> /dev/null && docker info &> /dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &> /dev/null; then

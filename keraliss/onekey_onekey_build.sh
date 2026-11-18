@@ -1,5 +1,5 @@
 #!/bin/bash
-# onekey_build.sh v3.1.0 - WalletScrutiny verification script for OneKey Hardware Wallets
+# onekey_build.sh v3.1.1 - WalletScrutiny verification script for OneKey Hardware Wallets
 # Usage: onekey_build.sh --version VERSION --type TYPE --hash HASH [--binary PATH]
 
 set -e
@@ -16,14 +16,14 @@ echo -e "\033[0m"
 sleep 2
 echo
 
-SCRIPT_VERSION="v3.1.0"
+SCRIPT_VERSION="v3.1.1"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 
 GREEN='\033[1;32m'
 RED='\033[1;31m'
 NC='\033[0m'
 
-if command -v docker &>/dev/null; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &>/dev/null; then

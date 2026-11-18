@@ -1,5 +1,5 @@
 #!/bin/bash
-# onekey_pro_build.sh v1.2.0 - Standardized verification script for OneKey Pro Hardware Wallet
+# onekey_pro_build.sh v1.2.1 - Standardized verification script for OneKey Pro Hardware Wallet
 # Supports stable (full/multi-coin) and btc-only firmware types
 # Usage: onekey_pro_build.sh --version VERSION [--type TYPE] [--binary PATH] [-c]
 
@@ -19,12 +19,12 @@ sleep 2
 echo
 
 # Global Variables
-SCRIPT_VERSION="v1.2.0"
+SCRIPT_VERSION="v1.2.1"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 shouldCleanup=false
 
 # Detect container runtime
-if command -v docker &> /dev/null; then
+if command -v docker &> /dev/null && docker info &> /dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &> /dev/null; then

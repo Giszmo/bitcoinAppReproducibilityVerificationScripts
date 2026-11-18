@@ -16,7 +16,7 @@ echo -e "\033[0m"
 sleep 2
 echo
 
-SCRIPT_VERSION="v1.6.0"
+SCRIPT_VERSION="v1.6.1"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 REPO="https://github.com/lnbits/hardware-wallet.git"
 
@@ -25,7 +25,7 @@ RED='\033[1;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-if command -v docker &>/dev/null; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
   CONTAINER_CMD="docker"
   echo "Using Docker for containerization"
 elif command -v podman &>/dev/null; then

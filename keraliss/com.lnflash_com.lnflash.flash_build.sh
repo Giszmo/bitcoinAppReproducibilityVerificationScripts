@@ -1,5 +1,5 @@
 #!/bin/bash
-# com.lnflash.flash_build.sh v1.10.0 - WalletScrutiny verification script for Flash Mobile
+# com.lnflash.flash_build.sh v1.10.1 - WalletScrutiny verification script for Flash Mobile
 # Follows WalletScrutiny reproducible verification standards
 # Usage: com.lnflash.flash_build.sh --version VERSION [--apk PATH] [--arch ARCH]
 #
@@ -22,14 +22,14 @@ sleep 2
 echo
 
 # Script metadata
-SCRIPT_VERSION="v1.10.0"
+SCRIPT_VERSION="v1.10.1"
 APP_ID="com.lnflash"
 REPO="https://github.com/lnflash/flash-mobile"
 BUILD_TYPE="apk"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 
 # Detect container runtime
-if command -v docker &> /dev/null; then
+if command -v docker &> /dev/null && docker info &> /dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &> /dev/null; then

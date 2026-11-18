@@ -1,5 +1,5 @@
 #!/bin/bash
-# im.adamant.adamant_build.sh v2.1.0 - Verification script for ADAMANT Messenger Android
+# im.adamant.adamant_build.sh v2.1.1 - Verification script for ADAMANT Messenger Android
 # Follows WalletScrutiny reproducible verification standards
 # Usage: im.adamant.adamant_build.sh --apk APK_PATH
 
@@ -19,13 +19,13 @@ sleep 2
 echo
 
 # Global Variables
-SCRIPT_VERSION="v2.1.0"
+SCRIPT_VERSION="v2.1.1"
 BUILD_TYPE="apk"
 workDir="$(pwd)/adamant-work"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 
 # Detect container runtime
-if command -v docker &> /dev/null; then
+if command -v docker &> /dev/null && docker info &> /dev/null; then
     CONTAINER_CMD="docker"
     echo "Using Docker for containerization"
 elif command -v podman &> /dev/null; then

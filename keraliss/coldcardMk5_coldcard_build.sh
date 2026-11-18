@@ -1,5 +1,5 @@
 #!/bin/bash
-# coldcard_build.sh v3.5.0 - WalletScrutiny verification script for Coldcard Hardware Wallet
+# coldcard_build.sh v3.5.1 - WalletScrutiny verification script for Coldcard Hardware Wallet
 # Follows WalletScrutiny reproducible verification standards
 # Usage: coldcard_build.sh --version VERSION --type MODEL [--binary FIRMWARE_FILE]
 
@@ -19,7 +19,7 @@ sleep 2
 echo
 
 # Global Variables
-SCRIPT_VERSION="v3.5.0"
+SCRIPT_VERSION="v3.5.1"
 RESULTS_FILE="$(pwd)/COMPARISON_RESULTS.yaml"
 repo="https://github.com/Coldcard/firmware.git"
 
@@ -29,7 +29,7 @@ RED='\033[1;31m'
 NC='\033[0m'
 
 # Detect container runtime
-if command -v docker &>/dev/null; then
+if command -v docker &>/dev/null && docker info &>/dev/null; then
   CONTAINER_CMD="docker"
   echo "Using Docker for containerization"
 elif command -v podman &>/dev/null; then
